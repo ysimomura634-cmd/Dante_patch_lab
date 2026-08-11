@@ -1,0 +1,1562 @@
+
+"use strict";
+/* ============ DANTE PATCH LAB — engine ============ */
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const W=960,H=520,DPR=Math.min(window.devicePixelRatio||1,2);
+cv.width=W*DPR;cv.height=H*DPR;cv.style.aspectRatio=W+'/'+H;ctx.scale(DPR,DPR);
+const C={panel:'#12204442',line:'#3A5590',ink:'#F2F6FF',dim:'#A9BDD8',faint:'#7E93B8',
+  cyan:'#6FD2FF',red:'#FF7086',amber:'#FFD86B',violet:'#C7A0FF',green:'#6FE8A8',gray:'#6C7FA6'};
+C.panel='#101C3C';
+const MONO="'IBM Plex Mono',monospace";
+const CHUNK=4;                 // 1 flow = 4ch (簡略)
+const FLOW_LIMIT=32;           // TXフロー上限
+const CAP={10000:5120,1000:512,100:48};   // リンク容量(ch換算)
+const LAT_HOPS={0.25:1,0.5:5,1:10,2:16,5:24}; // レイテンシ→許容スイッチホップ目安
+
+/* ---------- device catalog ---------- */
+const CAT={
+  'DM7':        {cat:'console',tx:16,rx:32,txName:'MIX',rxName:'IN',fl:32,desc:'Dante 144×144 / マウント24台'},
+  'DM7 Compact':{cat:'console',tx:16,rx:32,txName:'MIX',rxName:'IN',fl:32,desc:'Dante 144×144 / マウント24台'},
+  'Rio3224-D2': {cat:'rio',tx:32,rx:16,txName:'INPUT',rxName:'OUTPUT',fl:32,desc:'32in/16out I/Oラック'},
+  'Rio1608-D2': {cat:'rio',tx:16,rx:8,txName:'INPUT',rxName:'OUTPUT',fl:32,desc:'16in/8out I/Oラック'},
+  'REC PC':     {cat:'pc',tx:0,rx:32,txName:'',rxName:'DVS IN',fl:32,desc:'Dante Virtual Soundcard'},
+  'SWP1-8':     {cat:'sw',tx:0,rx:0,desc:'Dante向けL2SW / DIP設定'},
+  'SWP1-16MMF': {cat:'sw',tx:0,rx:0,desc:'Dante向けL2SW(光対応) / DIP設定'},
+  'SWP2-10MMF': {cat:'sw',tx:0,rx:0,desc:'L2SW etherCON×10 + 光10G(SFP+)×2 / DIP設定'},
+  'AVIO AI2':   {cat:'avio',tx:2,rx:0,txName:'IN',rxName:'',fl:2,desc:'アナログ2in (Ultimo: 2フロー/100M)'},
+  'AVIO AO2':   {cat:'avio',tx:0,rx:2,txName:'',rxName:'OUT',fl:2,desc:'アナログ2out (Ultimo: 2フロー/100M)'},
+  'AVIO USB':   {cat:'avio',tx:2,rx:2,txName:'IN',rxName:'OUT',fl:2,desc:'USB 2×2 (Ultimo: 2フロー/100M)'},
+};
+const flowLimit=m=>CAT[m].fl||32;
+const chLabel=(m,b,isTx)=>{const ch=isTx?CAT[m].tx:CAT[m].rx;return (b*CHUNK+1)+'-'+Math.min((b+1)*CHUNK,ch)};
+const banks=n=>Math.ceil(n/CHUNK);
+
+/* ---------- presets ---------- */
+function makeDev(id,model,name,x,y,opt={}){
+  const c=CAT[model].cat;
+  return Object.assign({id,model,name,x,y,fs:48,unitId:null,ha:{},clk:'DANTE',dip:'DANTE',nic:'WIRED',eee:false,qos:true,badnet:false,secMode:'REDUNDANT',net:'P',ipo:0,
+    w:c==='sw'?116:c==='avio'?104:140,h:c==='avio'?44:52},opt);
+}
+const PRESETS={
+S:{title:'小規模 — 配信・セミナー (冗長スター)',build(){return{
+  devices:{
+    dm7c:makeDev('dm7c','DM7 Compact','FOH',800,110),
+    rio1:makeDev('rio1','Rio1608-D2','STAGE',130,235,{unitId:1}),
+    swP:makeDev('swP','SWP1-8','SW-PRI',470,140,{net:'P'}),
+    swS:makeDev('swS','SWP1-8','SW-SEC',470,340,{net:'S'}),
+    rec:makeDev('rec','REC PC','REC PC (DVS)',800,300),
+  },
+  links:[{a:'rio1',b:'swP',speed:1000},{a:'rio1',b:'swS',speed:1000},
+         {a:'dm7c',b:'swP',speed:1000},{a:'dm7c',b:'swS',speed:1000},
+         {a:'rec',b:'swP',speed:1000}],
+  igmp:true,latency:1,
+  subs:{'dm7c:0':{tx:'rio1',bank:0},'dm7c:1':{tx:'rio1',bank:1},'dm7c:2':{tx:'rio1',bank:2},'dm7c:3':{tx:'rio1',bank:3},
+        'rio1:0':{tx:'dm7c',bank:0},'rio1:1':{tx:'dm7c',bank:1},
+        'rec:0':{tx:'rio1',bank:0},'rec:1':{tx:'rio1',bank:1}},
+  mcast:{},
+  ha:{dm7c:['rio1']},
+}}},
+M:{title:'中規模 — ホール (冗長2SW×2系統 + AVIO)',build(){return{
+  devices:{
+    dm7:makeDev('dm7','DM7','FOH',830,110),
+    rio1:makeDev('rio1','Rio3224-D2','STAGE',110,235,{unitId:1}),
+    swP1:makeDev('swP1','SWP1-8','STAGE SW-P',330,140,{net:'P'}),
+    swP2:makeDev('swP2','SWP1-16MMF','FOH SW-P',570,140,{net:'P'}),
+    swS1:makeDev('swS1','SWP1-8','STAGE SW-S',330,345,{net:'S'}),
+    swS2:makeDev('swS2','SWP1-16MMF','FOH SW-S',570,345,{net:'S'}),
+    rec:makeDev('rec','REC PC','REC PC (DVS)',830,255,{fs:96}),
+    avioU:makeDev('avioU','AVIO USB','配信PC',830,420),
+  },
+  links:[{a:'rio1',b:'swP1',speed:1000},{a:'swP1',b:'swP2',speed:1000},{a:'dm7',b:'swP2',speed:1000},
+         {a:'rio1',b:'swS1',speed:1000},{a:'swS1',b:'swS2',speed:1000},{a:'dm7',b:'swS2',speed:1000},
+         {a:'rec',b:'swP2',speed:1000},{a:'avioU',b:'swP2',speed:100}],
+  igmp:true,latency:0.25,
+  subs:{'dm7:0':{tx:'rio1',bank:0},'dm7:1':{tx:'rio1',bank:1},'dm7:2':{tx:'rio1',bank:2},'dm7:3':{tx:'rio1',bank:3},
+        'dm7:4':{tx:'rio1',bank:4},'dm7:5':{tx:'rio1',bank:5},
+        'rio1:0':{tx:'dm7',bank:0},'rio1:1':{tx:'dm7',bank:1},
+        'rec:0':{tx:'rio1',bank:0},'rec:1':{tx:'rio1',bank:1},
+        'avioU:0':{tx:'dm7',bank:0}},
+  mcast:{},
+  ha:{dm7:['rio1']},
+}}},
+L:{title:'大規模 — フェス FOH+MON 2卓 (冗長 / SWP2光コア×2系統)',build(){return{
+  devices:{
+    foh:makeDev('foh','DM7','FOH',845,80),
+    mon:makeDev('mon','DM7 Compact','MON',145,80),
+    rioA:makeDev('rioA','Rio3224-D2','STAGE-A',110,220,{unitId:1}),
+    rioB:makeDev('rioB','Rio3224-D2','STAGE-B',110,350,{unitId:1}),
+    rio16:makeDev('rio16','Rio1608-D2','AMP送り',145,480,{unitId:2}),
+    stP:makeDev('stP','SWP1-16MMF','STAGE SW-P',390,180,{net:'P'}),
+    stS:makeDev('stS','SWP1-16MMF','STAGE SW-S',390,350,{net:'S'}),
+    coP:makeDev('coP','SWP2-10MMF','CORE-P',645,140,{net:'P'}),
+    coS:makeDev('coS','SWP2-10MMF','CORE-S',645,400,{net:'S'}),
+    rec:makeDev('rec','REC PC','REC PC (DVS)',845,245),
+    ao2:makeDev('ao2','AVIO AO2','ロビー送り',845,480),
+  },
+  links:[{a:'rioA',b:'stP',speed:1000},{a:'rioA',b:'stS',speed:1000},
+         {a:'rioB',b:'stP',speed:1000},{a:'rioB',b:'stS',speed:1000},
+         {a:'mon',b:'stP',speed:1000},{a:'mon',b:'stS',speed:1000},
+         {a:'rio16',b:'stP',speed:1000},{a:'rio16',b:'stS',speed:1000},
+         {a:'stP',b:'coP',speed:10000,fiber:true},{a:'stS',b:'coS',speed:10000,fiber:true},
+         {a:'foh',b:'coP',speed:1000},{a:'foh',b:'coS',speed:1000},
+         {a:'rec',b:'coP',speed:1000},{a:'ao2',b:'coP',speed:100}],
+  igmp:true,latency:0.5,
+  subs:(()=>{const s={};
+    for(let i=0;i<6;i++)s['foh:'+i]={tx:'rioA',bank:i};
+    s['foh:6']={tx:'rioB',bank:0};s['foh:7']={tx:'rioB',bank:1};
+    for(let i=0;i<4;i++)s['mon:'+i]={tx:'rioA',bank:i};
+    for(let i=0;i<4;i++)s['mon:'+(4+i)]={tx:'rioB',bank:i};
+    for(let i=0;i<4;i++)s['rec:'+i]={tx:'rioB',bank:i};
+    s['rio16:0']={tx:'foh',bank:0};s['rio16:1']={tx:'foh',bank:1};
+    s['ao2:0']={tx:'foh',bank:0};
+    return s;})(),
+  mcast:{},
+  ha:{foh:['rioA','rioB'],mon:['rioA']},
+}}},
+};
+
+/* ---------- state ---------- */
+let sys=null,presetKey='S',selDev=null,rxSel=null;
+let packets=[],flowCache=[],simT=0,last=performance.now();
+
+/* ---------- log ---------- */
+const logEl=document.getElementById('log');
+function fmtT(){const s=simT/1000,m=Math.floor(s/60);return`T+${String(m).padStart(2,'0')}:${(s%60).toFixed(1).padStart(4,'0')}`}
+function log(tag,msg){
+  const T={au:'tg-au',mc:'tg-mc',igmp:'tg-igmp',sys:'tg-sys',ok:'tg-ok',ng:'tg-ng'};
+  const d=document.createElement('div');
+  d.innerHTML=`<span class="t">${fmtT()}</span><span class="tag ${T[tag]||'tg-sys'}">${tag.toUpperCase()}</span><span class="m">${msg}</span>`;
+  logEl.appendChild(d);
+  while(logEl.children.length>60)logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop=logEl.scrollHeight;
+}
+
+/* ---------- graph ---------- */
+function linkNet(l){
+  const A=sys.devices[l.a],B=sys.devices[l.b];
+  const an=CAT[A.model].cat==='sw'?A.net:null,bn=CAT[B.model].cat==='sw'?B.net:null;
+  if(an&&bn)return an===bn?an:'X';   // X = 系統不一致(通常発生しない)
+  return an||bn||'P';
+}
+function blockReason(l){
+  if(l.down)return 'down';
+  if(linkNet(l)==='X')return 'cross';
+  const A=sys.devices[l.a],B=sys.devices[l.b];
+  if(CAT[A.model].cat==='sw'&&CAT[B.model].cat==='sw'&&A.dip!==B.dip)return 'dip';
+  if((CAT[A.model].cat==='pc'&&A.nic==='WIFI')||(CAT[B.model].cat==='pc'&&B.nic==='WIFI'))return 'wifi';
+  if(A.badnet||B.badnet)return 'subnet';
+  return null;
+}
+function daisyBridges(){
+  return Object.values(sys.devices).filter(d=>CAT[d.model].cat==='rio'&&d.secMode==='DAISY'
+    &&sys.links.some(l=>(l.a===d.id||l.b===d.id)&&linkNet(l)==='S'));
+}
+function hasSLink(id){return sys.links.some(l=>(l.a===id||l.b===id)&&linkNet(l)==='S'&&!blockReason(l))}
+const BLOCK_LABEL={dip:'✕ VLAN不一致 — 遮断',wifi:'✕ 別サブネット — 不達',down:'✕ 断線',subnet:'✕ 静的IP誤設定 — 不達'};
+function linkCap(l){return CAP[l.speed]}
+function linkBlocked(l){return !!blockReason(l)}
+function troubleMask(){return typeof challenge!=='undefined'&&challenge.active&&challenge.trouble&&!challenge.cleared&&!challenge.revealed}
+function neighbors(id,net){
+  const r=[];
+  for(const l of sys.links){if(linkBlocked(l))continue;
+    if(net&&linkNet(l)!==net)continue;
+    if(l.a===id)r.push({to:l.b,link:l});if(l.b===id)r.push({to:l.a,link:l})}
+  return r;
+}
+function routeNet(a,b,net){ // 系統内BFS → array of links
+  if(a===b)return[];
+  const prev={[a]:null},q=[a];
+  while(q.length){
+    const cur=q.shift();
+    for(const n of neighbors(cur,net)){
+      if(!(n.to in prev)){prev[n.to]={from:cur,link:n.link};q.push(n.to);
+        if(n.to===b){const path=[];let c=b;
+          while(prev[c]){path.unshift(prev[c].link);c=prev[c].from}return path}}
+    }
+  }
+  return null;
+}
+function route(a,b){ // 到達可否 (P優先、次にS) — 冗長: どちらかで届けば音は出る
+  return routeNet(a,b,'P')||routeNet(a,b,'S');
+}
+const linkKey=l=>[l.a,l.b].sort().join('|');
+
+
+/* ---------- flow computation ---------- */
+function computeFlows(){
+  const groups={};
+  for(const [k,v] of Object.entries(sys.subs)){
+    const rxDev=k.split(':')[0],gk=v.tx+':'+v.bank;
+    (groups[gk]=groups[gk]||[]).push(rxDev);
+  }
+  const flows=[],txFlowCount={},rxFlowCount={},linkLoad={};
+  const noroute=[],degraded=[]; // degraded: 冗長対応ペアなのに片系のみ
+  for(const [gk,rxs] of Object.entries(groups)){
+    const [tx,bank]=gk.split(':');
+    const mc=!!sys.mcast[gk];
+    const err=rxs.some(r=>sys.devices[r].fs!==sys.devices[tx].fs);
+    const f={tx,bank:+bank,rx:[...new Set(rxs)],mcast:mc,error:err};
+    flows.push(f);
+    if(err)continue;
+    const reach={P:[],S:[]},reached=[];
+    for(const r of f.rx){
+      const rp=routeNet(tx,r,'P'),rs=routeNet(tx,r,'S');
+      if(!rp&&!rs){noroute.push({tx,rx:r});continue}
+      reached.push(r);
+      rxFlowCount[r]=(rxFlowCount[r]||0)+1;
+      if(rp)reach.P.push({r,links:rp});
+      if(rs)reach.S.push({r,links:rs});
+      // 両端が冗長配線済みなのに片系しか届かない → 冗長性喪失
+      const capable=hasAnySLinkRaw(tx)&&hasAnySLinkRaw(r);
+      if(capable&&(!rp!==!rs))degraded.push({tx,rx:r,net:rp?'P':'S'});
+    }
+    if(!reached.length)continue;
+    if(mc){
+      txFlowCount[tx]=(txFlowCount[tx]||0)+1;
+      if(!sys.igmp){
+        for(const l of sys.links)linkLoad[linkKey(l)]=(linkLoad[linkKey(l)]||0)+CHUNK;
+      }else{
+        for(const net of ['P','S']){
+          const set=new Set();
+          for(const e of reach[net])for(const l of e.links)set.add(linkKey(l));
+          for(const lk of set)linkLoad[lk]=(linkLoad[lk]||0)+CHUNK;
+        }
+      }
+    }else{
+      txFlowCount[tx]=(txFlowCount[tx]||0)+reached.length;
+      for(const net of ['P','S'])
+        for(const e of reach[net])for(const l of e.links)linkLoad[linkKey(l)]=(linkLoad[linkKey(l)]||0)+CHUNK;
+    }
+  }
+  // ループ or P/S融合(混線・デイジー) = ストーム: 全リンクに異常トラフィック
+  const bridged=daisyBridges().length>0;
+  if(sys.links.some(l=>l.loop&&!l.down)||bridged){
+    for(const l of sys.links)linkLoad[linkKey(l)]=(linkLoad[linkKey(l)]||0)+(bridged?120:180);
+  }
+  return{flows,txFlowCount,rxFlowCount,linkLoad,noroute,degraded,bridged};
+}
+// 配線として両系を持つか(遮断は無視した素の配線)
+function hasAnySLinkRaw(id){return sys.links.some(l=>{
+  if(l.a!==id&&l.b!==id)return false;
+  const other=sys.devices[l.a===id?l.b:l.a];
+  return CAT[other.model].cat==='sw'&&other.net==='S';
+})}
+
+/* ---------- diagnostics ---------- */
+function runDiag(){
+  const{flows,txFlowCount,rxFlowCount,linkLoad,noroute,degraded,bridged}=computeFlows();
+  const out=[];
+  const D=sys.devices;
+  // UNIT ID duplicate
+  const ids={};
+  for(const d of Object.values(D))if(CAT[d.model].cat==='rio')(ids[d.unitId]=ids[d.unitId]||[]).push(d);
+  for(const [uid,arr] of Object.entries(ids))if(arr.length>1){
+    out.push({s:'E',m:`<b>UNIT ID競合</b>: ${arr.map(d=>d.name).join(' と ')} が同じ ID=${uid}。デバイス名(Y0${(+uid).toString(16).padStart(2,'0')}-Yamaha-…)が衝突し、コンソールのマウント/HAリモートが不定になる`,
+      f:'インスペクタでどちらかのUNIT IDを変更(1〜24)'});
+  }
+  // DIP mismatch on sw-sw links
+  for(const l of sys.links)if(blockReason(l)==='dip'){
+    out.push({s:'E',m:`<b>スイッチ設定不一致(DIP)</b>: ${D[l.a].name} と ${D[l.b].name} のVLANプリセットが食い違い、リンク越しの通信が遮断。配下のデバイスが互いに見えない`,
+      f:'インスペクタで両スイッチのDIP(VLANプリセット)を揃える'});
+  }
+  // no-route subscriptions
+  const nrPairs={};
+  for(const n of noroute)nrPairs[n.tx+'>'+n.rx]=1;
+  for(const k of Object.keys(nrPairs)){
+    const [tx,rx]=k.split('>');
+    out.push({s:'E',m:`<b>購読経路なし</b>: ${D[tx].name} → ${D[rx].name} に到達可能な経路がない(ネットワーク分断)`,
+      f:'分断原因(DIP不一致・配線)を解消'});
+  }
+  // DVS NIC binding (Wi-Fi / 別サブネット)
+  for(const d of Object.values(D))if(CAT[d.model].cat==='pc'&&d.nic==='WIFI'){
+    out.push({s:'E',m:`<b>DVSインターフェース誤バインド</b>: ${d.name} がWi-Fi側(172.16.0.x — 別サブネット)で通信中。PC自体はネットに出られるため設定ミスに気づきにくいが、DanteはWi-Fi非対応・有線LAN前提`,
+      f:'DVS/Dante Controllerのインターフェース選択を有線NIC(192.168.10.x)へ。現場PCはWi-Fi無効化が定石'});
+  }
+  // clock source
+  for(const d of Object.values(D)){
+    const c=CAT[d.model].cat;
+    if((c==='console'||c==='rio'||c==='avio')&&d.clk==='INT'){
+      out.push({s:'E',m:`<b>クロックソース不整合</b>: ${d.name} が内部クロック固定 — PTPに追従せず、この機器の入出力に周期的なクリックノイズが発生`,
+        f:'インスペクタでDante(PTP)同期へ。外部WCLK基準にしたい場合はGM側をWCLKスレーブにし、他機器は必ずPTP追従'});
+    }
+  }
+  // Secondaryポート デイジーチェーンモード誤り
+  for(const d of daisyBridges()){
+    out.push({s:'E',m:`<b>Secondaryポート設定誤り</b>: ${d.name} のSECONDARYが<b>デイジーチェーンモード</b>のまま冗長配線されている。機器内部でP/Sがブリッジされ、両系が融合する`,
+      f:'インスペクタでSECONDARYをREDUNDANTモードへ(D2系はSETUPメニュー)'});
+  }
+  // 冗長性喪失 (音は出ているが片系のみ)
+  {const seen={};
+  for(const g of degraded){const k=g.tx+'>'+g.rx;if(seen[k])continue;seen[k]=1;
+    out.push({s:'W',m:`<b>冗長性喪失</b>: ${D[g.tx].name} → ${D[g.rx].name} が <b>${g.net}系のみ</b>で到達。音は出ているが、残る1系が落ちた瞬間に無音 — 気づかず本番を迎える最恐パターン`,
+      f:'届いていない系統の経路を点検(断線・DIP・モード)。冗長は「壊れた時に初めて仕事をする」'});
+  }}
+  // 非冗長機器 (仕様)
+  for(const d of Object.values(D)){
+    const c=CAT[d.model].cat;
+    if((c==='pc'||c==='avio')&&Object.entries(sys.subs).some(([k,v])=>k.split(':')[0]===d.id||v.tx===d.id)){
+      out.push({s:'I',m:`${d.name} はPrimaryのみ接続(DVS/AVIOは冗長非対応) — この経路は仕様上シングル`,f:''});
+    }
+  }
+  // ケーブル断線
+  for(const l of sys.links)if(l.down){
+    out.push({s:'E',m:`<b>リンク断/ケーブル抜け</b>: ${D[l.a].name}—${D[l.b].name} がリンクダウン(ポートLED消灯)。この系統は完全に無音`,
+      f:'NETWORK SETTINGSのリンクを再接続。実機はまずLEDと抜け・ラッチ確認、次に別ケーブルで切り分け'});
+  }
+  // ケーブル品質不良 (CRC)
+  for(const l of sys.links)if(l.crc){
+    out.push({s:'E',m:`<b>ケーブル品質不良(CRCエラー増加)</b>: ${D[l.a].name}—${D[l.b].name} — 規格不足・距離超過・損傷でエラー再送が多発。「揺らすと変わる」不安定さの正体`,
+      f:'ケーブル交換(CAT5e以上・100m以内)。中継コネクタも撤去'});
+  }
+  // 光リンク劣化 (SFP)
+  for(const l of sys.links)if(l.sfpBad){
+    out.push({s:'E',m:`<b>光リンク劣化</b>: ${D[l.a].name}—${D[l.b].name} — コネクタ汚れ/曲げ半径/SFPモジュール劣化により瞬断が発生`,
+      f:'光コネクタ清掃 → 改善なければSFP交換。曲げ半径も点検'});
+  }
+  // スイッチループ
+  if(sys.links.some(l=>l.loop&&!l.down)){
+    out.push({s:'E',m:`<b>ループ配線検出</b>: スイッチ間に余分な結線があり、ブロードキャストストームが発生。全リンクのトラフィックが異常膨張し全系統が不安定`,
+      f:'NETWORK SETTINGSで該当リンクを撤去。SWPシリーズはループ検知機能があるので有効化しておくのが定石'});
+  }
+  // QoS無効
+  for(const d of Object.values(D))if(CAT[d.model].cat==='sw'&&!d.qos){
+    out.push({s:'E',m:`<b>QoS(DSCP優先制御)無効</b>: ${d.name} — PTPが他トラフィックと同列に並び、負荷が上がった瞬間にクロックジッタ→全体にノイズ`,
+      f:'インスペクタでQoSを有効化。SWPはDante向けQoS設定済みが本来の姿'});
+  }
+  // IGMPクエリア不在
+  {const mcN=flows.filter(f=>f.mcast&&!f.error).length;
+  if(mcN>0&&sys.igmp&&!sys.querier){
+    out.push({s:'E',m:`<b>IGMPクエリア不在</b>: スヌーピングは有効だが、定期Queryを出すクエリアがいない。参加情報が失効し、<b>数分後にマルチキャストが突然停止</b>する時限爆弾`,
+      f:'NETWORK SETTINGSでクエリアをON(通常はコアスイッチが担当。ネットワークに必ず1台)'});
+  }}
+  // 静的IP誤セグメント
+  for(const d of Object.values(D))if(d.badnet){
+    out.push({s:'E',m:`<b>静的IP誤設定</b>: ${d.name} が 192.168.<b>1</b>.${d.ipo}(誤セグメント)。Danteセグメント(192.168.10.x)から到達できず、この機器だけ見えない`,
+      f:'インスペクタのIP欄から正セグメントへ修正。静的割当は台帳+設定後の疎通確認をセットで'});
+  }
+  // EEE (省電力イーサネット)
+  for(const d of Object.values(D))if(CAT[d.model].cat==='sw'&&d.eee){
+    out.push({s:'E',m:`<b>EEE(省電力イーサネット)有効</b>: ${d.name} — 無音・低負荷時にリンクが省電力状態へ遷移し、復帰の瞬間にDanteがドロップする。SWPは工場出荷で無効だが、汎用SWからの置換時や設定復元ミスで混入しがち`,
+      f:'インスペクタでEEEを無効化。Dante用スイッチではEEE無効が鉄則'});
+  }
+  // IPアドレス重複 (有線側のみ)
+  const ipMap={};
+  for(const d of Object.values(D))if(CAT[d.model].cat!=='sw'&&!(CAT[d.model].cat==='pc'&&d.nic==='WIFI'))
+    (ipMap[d.ipo]=ipMap[d.ipo]||[]).push(d);
+  for(const arr of Object.values(ipMap))if(arr.length>1){
+    out.push({s:'E',m:`<b>IPアドレス重複</b>: ${arr.map(d=>d.name).join(' と ')} が 192.168.10.${arr[0].ipo} を取り合い — ARPが揺れて機器が見えたり消えたりする不安定動作`,
+      f:'インスペクタでどちらかのIPを変更。実運用はDHCP一元管理か重複しない静的割当表で防ぐ'});
+  }
+  // HA control conflict
+  const haBy={};
+  for(const [con,list] of Object.entries(sys.ha))for(const r of list)(haBy[r]=haBy[r]||[]).push(con);
+  for(const [rio,cons] of Object.entries(haBy))if(cons.length>1){
+    out.push({s:'E',m:`<b>HAコントロール二重取得</b>: ${D[rio].name} のヘッドアンプを ${cons.map(c=>D[c].name).join(' と ')} が同時掌握。片方がゲインを触るともう片方の入力レベルが動く(ゲイン競合)`,
+      f:'HA権限を1卓に集約。もう1卓はゲインコンペンセーション運用'});
+  }
+  // fs mismatch (デバイスペア単位)
+  const fsPairs={};
+  for(const f of flows)if(f.error)for(const r of f.rx)if(D[r].fs!==D[f.tx].fs)fsPairs[f.tx+'>'+r]=(fsPairs[f.tx+'>'+r]||0)+1;
+  for(const [k,n] of Object.entries(fsPairs)){
+    const [tx,rx]=k.split('>');
+    out.push({s:'E',m:`<b>サンプルレート不一致</b>: ${D[tx].name}(${D[tx].fs}kHz) → ${D[rx].name}(${D[rx].fs}kHz) — ${n}バンクの購読が成立しない(マトリクスの ✕)`,
+      f:'インスペクタでレートを統一(Dante網は単一クロックドメイン=単一レート)'});
+  }
+  // link overload (ストーム中はループが根本原因なので個別警告は抑制)
+  const storming=sys.links.some(l=>l.loop&&!l.down)||bridged;
+  for(const l of sys.links){
+    if(storming)break;
+    const load=linkLoad[linkKey(l)]||0,cap=linkCap(l);
+    const nm=`${D[l.a].name}—${D[l.b].name}`;
+    if(load>cap)out.push({s:'E',m:`<b>リンク帯域超過</b>: ${nm} (${l.speed===10000?'10G':l.speed+'M'}) に ${load}ch / 上限≈${cap}ch。音切れ・購読不能`,
+      f:l.speed===100?'リンク増速 or マルチキャスト化(+IGMP)で本数削減。AVIO等Ultimo機は100M固定なのでIGMP必須':'マルチキャスト化やルート分散を検討'});
+    else if(load>cap*0.7)out.push({s:'W',m:`<b>リンク帯域逼迫</b>: ${nm} が ${load}ch / ≈${cap}ch (${Math.round(load/cap*100)}%)`,
+      f:'マルチキャスト化 or リンク増速を検討'});
+  }
+  // TX flow exhaustion (機種別上限: Ultimo=2)
+  for(const [tx,n] of Object.entries(txFlowCount)){
+    const lim=flowLimit(D[tx].model);
+    if(n>lim)out.push({s:'E',m:`<b>TXフロー枯渇</b>: ${D[tx].name} が ${n}/${lim} フロー${lim===2?' (Ultimoチップは2フロー上限)':''}。超過分の購読は成立しない`,
+      f:'受信者の多いTXバンクをマルチキャスト化(何台受けても1フロー)'});
+    else if(n>lim*0.75)out.push({s:'W',m:`<b>TXフロー残少</b>: ${D[tx].name} ${n}/${lim}`,f:'マルチキャスト化で節約可能'});
+  }
+  // RX flow exhaustion
+  for(const [rx,n] of Object.entries(rxFlowCount)){
+    const lim=flowLimit(D[rx].model);
+    if(n>lim)out.push({s:'E',m:`<b>RXフロー枯渇</b>: ${D[rx].name} が ${n}/${lim} 受信フロー${lim===2?' (Ultimoチップは2フロー上限)':''}`,
+      f:'受信元をまとめる(同一TXの連続バンク=1フロー扱いは実機仕様。本ラボでは購読元デバイス数を減らす/マルチキャスト集約)'});
+  }
+  // latency vs hops
+  let maxHop=0,maxPath='';
+  for(const f of flows){if(f.error)continue;
+    for(const r of f.rx)for(const net of ['P','S']){
+      const rt=routeNet(f.tx,r,net);if(!rt)continue;
+      const sws=new Set();for(const l of rt)for(const e of [l.a,l.b])if(CAT[D[e].model].cat==='sw')sws.add(e);
+      if(sws.size>maxHop){maxHop=sws.size;maxPath=`${D[f.tx].name}→${D[r].name}(${net})`}}}
+  const okHops=LAT_HOPS[sys.latency]||1;
+  if(maxHop>okHops)out.push({s:'W',m:`<b>レイテンシ設定が浅い</b>: ${sys.latency}ms は目安${okHops}ホップまで。最長経路 ${maxPath} は SW${maxHop}段 — バッファ不足で周期的ドロップの恐れ`,
+    f:`NETWORK SETTINGSでレイテンシを${maxHop<=5?'0.5〜1':'1〜2'}msへ`});
+  // multicast without IGMP
+  const mcCount=flows.filter(f=>f.mcast&&!f.error).length;
+  if(mcCount>0&&!sys.igmp)out.push({s:'E',m:`<b>IGMPスヌーピング無効でマルチキャスト運用</b>: ${mcCount}フローが全リンクへフラッディング中(リンク表示の負荷にも計上)。100MのAVIO/Ultimo機は特に危険`,
+    f:'NETWORK SETTINGSでIGMPスヌーピングをON(SWPはDIP設定でプリセット済みが本来の姿)'});
+  // unicast fan-out
+  for(const f of flows)if(!f.mcast&&!f.error&&f.rx.length>=3){
+    out.push({s:'W',m:`<b>ユニキャスト多重配信</b>: ${D[f.tx].name} ${CAT[D[f.tx].model].txName} ${chLabel(D[f.tx].model,f.bank,true)} を${f.rx.length}台へ個別送信(=${f.rx.length}フロー)`,
+      f:'列頭の M でマルチキャスト化 → 1フローに集約'});
+  }
+  // unmounted rio (info)
+  const mountedRios=new Set(Object.values(sys.ha).flat());
+  for(const d of Object.values(D))if(CAT[d.model].cat==='rio'&&!mountedRios.has(d.id)){
+    out.push({s:'I',m:`${d.name} はどのコンソールもHAリモートしていない(ゲインは本体/R Remote操作)`,f:''});
+  }
+  renderDiag(out);
+  return out;
+}
+function updateTroubleTickets(items){
+  if(challenge.suspend)return;
+  if(!challenge.moves){challenge.resolved=(challenge.injectedIds||[]).map(()=>false);return}
+  challenge.resolved=challenge.resolved||[];
+  challenge.resolvedTexts=challenge.resolvedTexts||{};
+  (challenge.injectedIds||[]).forEach((id,i)=>{
+    const pat=FAULT_PATTERN[id];
+    const ok=pat?!items.some(it=>pat.test(it.m)):false;
+    if(ok&&!challenge.resolved[i]&&!challenge.cleared){
+      if(!challenge.resolvedTexts[i]){
+        const v=RESOLVED[id]||['症状の解消を確認。'];
+        challenge.resolvedTexts[i]=v[Math.floor(Math.random()*v.length)];
+      }
+      log('ok',`<b>【現場より】</b>${challenge.resolvedTexts[i]}`);
+      if(typeof SFX!=='undefined')SFX.play('resolve');
+    }
+    challenge.resolved[i]=ok;
+  });
+}
+function renderDiag(items){
+  const el=document.getElementById('diag'),hb=document.getElementById('health');
+  if(typeof challenge!=='undefined'&&challenge.active&&challenge.trouble&&!challenge.cleared&&!challenge.revealed){
+    updateTroubleTickets(items);
+    const total=challenge.tickets.length;
+    const solved=(challenge.resolved||[]).filter(Boolean).length;
+    hb.className='health '+(solved===total&&total?'ok':'warn');
+    hb.textContent=`調査中 ${solved}/${total} 解決`;
+    el.innerHTML=challenge.tickets.map((t,i)=>{
+      const ok=challenge.resolved&&challenge.resolved[i];
+      const num='①②③④⑤⑥⑦⑧⑨'[i]||(i+1);
+      return`<div class="dg"><span class="sev ${ok?'I':'W'}" style="${ok
+        ?'background:rgba(30,90,60,.6);color:var(--green);border-color:rgba(111,232,168,.5)'
+        :'background:rgba(70,45,110,.6);color:var(--violet);border-color:rgba(199,160,255,.4)'}">${ok?'解決'+num:'報告'+num}</span>
+      <span class="body" style="${ok?'color:var(--green)':''}">${ok?`<b>【現場より】</b>${challenge.resolvedTexts[i]||'症状の解消を確認。'}`:t}</span></div>`;
+    }).join('')
+      +`<div class="dg"><span class="body" style="color:var(--faintsolid)">手掛かり: リンクのch負荷 / マトリクスの✕とフロー数 / 各デバイスのインスペクタ(ID・クロック・DIP・HA) / ログ<br>
+      <button class="btn" style="margin-top:8px" onclick="revealAnswer()">ギブアップ (診断を開く)</button></span></div>`;
+    return;
+  }
+  const e=items.filter(i=>i.s==='E').length,w=items.filter(i=>i.s==='W').length;
+  hb.className='health '+(e?'err':w?'warn':'ok');
+  hb.textContent=e?`要修正 E${e}/W${w}`:w?`注意 W${w}`:'健全 ALL GREEN';
+  if(!items.length){el.innerHTML='<div class="dg allok">✓ 欠陥は検出されなかった</div>';return}
+  el.innerHTML=items.map(i=>`<div class="dg"><span class="sev ${i.s}">${i.s==='E'?'ERROR':i.s==='W'?'WARN':'INFO'}</span>
+    <span class="body">${i.m}${i.f?`<span class="fix">${i.f}</span>`:''}</span></div>`).join('');
+}
+
+/* ---------- patch matrix ---------- */
+function txDevices(){return Object.values(sys.devices).filter(d=>CAT[d.model].tx>0)}
+function rxDevices(){return Object.values(sys.devices).filter(d=>CAT[d.model].rx>0)}
+function renderMatrixTabs(){
+  const el=document.getElementById('mx-tabs');
+  el.innerHTML=rxDevices().map(d=>
+    `<button class="mx-tab${d.id===rxSel?' on':''}" onclick="setRx('${d.id}')">RX: ${d.name} <span class="msub">${d.model}</span></button>`).join('');
+}
+window.setRx=id=>{rxSel=id;renderMatrixTabs();renderMatrix()};
+function renderMatrix(){
+  const host=document.getElementById('mx-host');
+  const rx=sys.devices[rxSel];if(!rx){host.innerHTML='';return}
+  const{txFlowCount}=computeFlows();
+  const txs=txDevices().filter(t=>t.id!==rxSel);
+  let h='<table class="mx"><tr><th class="rxh"></th>';
+  for(const t of txs){
+    const lim=flowLimit(t.model);
+    const n=txFlowCount[t.id]||0,over=n>lim;
+    h+=`<th class="dev" colspan="${banks(CAT[t.model].tx)}">${t.name}<small class="${over?'over':''}">flows ${n}/${lim}</small></th>`;
+  }
+  h+='</tr><tr><th class="rxh">TX →</th>';
+  for(const t of txs)for(let b=0;b<banks(CAT[t.model].tx);b++){
+    const mk=t.id+':'+b,on=!!sys.mcast[mk];
+    h+=`<th>${chLabel(t.model,b,true)}<button class="mtgl${on?' on':''}" onclick="toggleMcast('${t.id}',${b})" title="マルチキャスト切替">M</button></th>`;
+  }
+  h+='</tr>';
+  for(let rb=0;rb<banks(CAT[rx.model].rx);rb++){
+    h+=`<tr><th class="rxh">${CAT[rx.model].rxName} ${chLabel(rx.model,rb,false)}</th>`;
+    const cur=sys.subs[rx.id+':'+rb];
+    for(const t of txs)for(let b=0;b<banks(CAT[t.model].tx);b++){
+      const is=cur&&cur.tx===t.id&&cur.bank===b;
+      let cls='cell',sym='';
+      if(is){
+        if(sys.devices[t.id].fs!==rx.fs||route(t.id,rx.id)===null){cls+=' ng';sym='✕'}
+        else if(sys.mcast[t.id+':'+b]){cls+=' mc';sym='◆'}
+        else{cls+=' ok';sym='✓'}
+      }
+      h+=`<td class="${cls}" onclick="togglePatch('${rx.id}',${rb},'${t.id}',${b})">${sym}</td>`;
+    }
+    h+='</tr>';
+  }
+  h+='</table>';
+  host.innerHTML=h;
+  // flow summary
+  const{flows,linkLoad}=computeFlows();
+  const uni=flows.filter(f=>!f.mcast&&!f.error).reduce((a,f)=>a+f.rx.length,0);
+  const mc=flows.filter(f=>f.mcast&&!f.error).length;
+  document.getElementById('flow-summary').textContent=`ユニキャスト ${uni}フロー / マルチキャスト ${mc}フロー`;
+}
+window.togglePatch=(rxId,rb,txId,tb)=>{if(rxId===txId)return;if(typeof SFX!=='undefined')SFX.play('tick');bumpMove();
+  const k=rxId+':'+rb,cur=sys.subs[k];
+  const rx=sys.devices[rxId],tx=sys.devices[txId];
+  if(cur&&cur.tx===txId&&cur.bank===tb){
+    delete sys.subs[k];
+    log('sys',`購読解除: ${rx.name} ${CAT[rx.model].rxName}${rb*CHUNK+1}- ← ${tx.name}`);
+  }else{
+    sys.subs[k]={tx:txId,bank:tb};
+    if(tx.fs!==rx.fs){
+      log('ng',`購読失敗: ${tx.name}(${tx.fs}kHz) → ${rx.name}(${rx.fs}kHz) — <b>レート不一致</b>`);
+    }else if(sys.mcast[txId+':'+tb]){
+      log('igmp',`${rx.name} → SW : <b>IGMP Join</b> (239.255.x.x) — マルチキャストフローを購読`);
+    }else{
+      log('au',`購読: ${rx.name} ← ${tx.name} ${CAT[tx.model].txName}${tb*CHUNK+1}-${tb*CHUNK+CHUNK} (ユニキャストフロー生成)`);
+    }
+  }
+  refresh();
+};
+window.toggleMcast=(txId,b)=>{bumpMove();
+  const k=txId+':'+b,on=!sys.mcast[k];
+  if(on)sys.mcast[k]=true;else delete sys.mcast[k];
+  const tx=sys.devices[txId];
+  log(on?'mc':'sys',on
+    ?`${tx.name} ${CAT[tx.model].txName}${b*CHUNK+1}-${b*CHUNK+CHUNK} を<b>マルチキャストフロー化</b> — 受信者がIGMP Joinで参加`
+    :`${tx.name} バンク${b+1} をユニキャストに戻した`);
+  refresh();
+};
+
+/* ---------- inspector ---------- */
+function statusBlk(d){
+  const cat=CAT[d.model].cat;
+  const wifi=cat==='pc'&&d.nic==='WIFI';
+  const clkTxt=d.clk==='INT'?'<span class="bad">Internal固定</span>':'<span class="ok">Follower (PTP追従)</span>';
+  return`<div class="statusblk">
+    <span><span class="${wifi?'wa':'ok'}">●</span> ${wifi?'到達不安定':'オンライン'}</span>
+    <span>IP <b style="color:${wifi?'var(--amber)':'var(--ink)'}">${devIP(d)}</b></span>
+    ${cat!=='pc'?`<span>CLK ${clkTxt}</span>`:''}
+    <span>LAT ${sys.latency}ms</span>
+  </div>`;
+}
+function ipRow(d){
+  if(d.badnet)return`<div class="prop"><span class="pl">IPアドレス</span>
+    <span style="font-family:var(--mono);font-size:11px;color:var(--red)">192.168.<b>1</b>.${d.ipo} — 誤セグメント</span>
+    <button class="ha-tgl" style="border-color:var(--green);color:var(--green)" onclick="fixBadnet('${d.id}')">.10セグへ修正</button></div>`;
+  return`<div class="prop"><span class="pl">IPアドレス</span>
+    <div class="stepper"><button onclick="stepIp('${d.id}',-1)">−</button>
+    <span class="val">.${d.ipo}</span>
+    <button onclick="stepIp('${d.id}',1)">+</button></div>
+    <span style="font-family:var(--mono);font-size:10px;color:var(--faint)">192.168.10.${d.ipo}</span></div>`;
+}
+function portView(sw){
+  const cfg=sw.model==='SWP2-10MMF'?{rj:10,sfp:2}:sw.model==='SWP1-16MMF'?{rj:16,sfp:0}:{rj:8,sfp:0};
+  const conns=sys.links.filter(l=>l.a===sw.id||l.b===sw.id)
+    .map(l=>({l,other:sys.devices[l.a===sw.id?l.b:l.a]}));
+  // アップリンク(SW間)を後方ポートへ、光はSFPへ — LAN Monitor風に整列
+  const sfpC=conns.filter(c=>c.l.fiber);
+  const rjC=conns.filter(c=>!c.l.fiber).sort((a,b)=>
+    (CAT[a.other.model].cat==='sw')-(CAT[b.other.model].cat==='sw'));
+  const rjUp=rjC.filter(c=>CAT[c.other.model].cat==='sw');
+  const rjDn=rjC.filter(c=>CAT[c.other.model].cat!=='sw');
+  const ports=[];
+  for(let p=1;p<=cfg.rj;p++){
+    let c=null;
+    if(p<=rjDn.length)c=rjDn[p-1];
+    else if(p>cfg.rj-rjUp.length)c=rjUp[p-(cfg.rj-rjUp.length)-1];
+    ports.push({no:p,type:'RJ',c});
+  }
+  for(let s=1;s<=cfg.sfp;s++)ports.push({no:s,type:'SFP',c:sfpC[s-1]||null});
+  const vlanOf=p=>{
+    if(sw.dip==='DANTE')return 1;
+    if(p.type==='SFP')return 2;
+    if(p.c&&CAT[p.c.other.model].cat==='sw')return 2;   // 分割時: アップリンクが制御VLANへ
+    return p.no>Math.ceil(cfg.rj*0.75)?2:1;
+  };
+  let html=`<div class="vlegend"><span class="sw1">■ VLAN1 Dante</span><span class="sw2">■ VLAN2 制御系</span><span>右上●=リンクアップ</span></div><div class="portstrip">`;
+  for(const p of ports){
+    const v=vlanOf(p);
+    const blocked=p.c&&blockReason(p.c.l);
+    const cls=`port v${v}${p.c?(blocked?' blocked':' on'):''}`;
+    html+=`<div class="${cls}" title="${p.c?p.c.other.name+(blocked?' — 遮断('+(blockReason(p.c.l)==='dip'?'VLAN不一致':'別サブネット')+')':''):'空きポート'}">
+      <div class="jack">${p.type==='SFP'?'◈'+p.no:p.no}<span class="up"></span></div>
+      <div class="pdev">${p.c?p.c.other.name.slice(0,5):''}</div></div>`;
+  }
+  html+=`</div>`;
+  return html;
+}
+function renderInspector(){
+  const el=document.getElementById('inspector');
+  if(!selDev){el.innerHTML='<div class="ins-empty">キャンバス上のデバイスをクリック — サンプルレート・クロック・UNIT ID・IP・DVSバインド先・スイッチのポート/VLAN状態はここで自分の目で確認する。</div>';return}
+  const d=sys.devices[selDev],cat=CAT[d.model].cat;
+  let h=`<h4>${d.name}</h4><div class="sub">${d.model} — ${CAT[d.model].desc}</div>`;
+  if(cat!=='sw')h+=statusBlk(d);
+  if(cat==='rio'){
+    const dup=Object.values(sys.devices).some(o=>o.id!==d.id&&CAT[o.model].cat==='rio'&&o.unitId===d.unitId);
+    h+=`<div class="prop"><span class="pl">UNIT ID</span>
+      <div class="stepper"><button onclick="stepId('${d.id}',-1)">−</button>
+      <span class="val" style="color:${dup?'var(--red)':'var(--ink)'}">${d.unitId} <small>(Y0${d.unitId.toString(16).padStart(2,'0')})</small></span>
+      <button onclick="stepId('${d.id}',1)">+</button></div>
+      ${dup?'<span style="color:var(--red);font-family:var(--mono);font-size:10px">競合中</span>':''}</div>`;
+    h+=fsRow(d)+clkRow(d)+ipRow(d);
+    const wired2=hasAnySLinkRaw(d.id);
+    h+=`<div class="prop"><span class="pl">SECONDARY</span>
+      <div class="seg">
+        <button class="${d.secMode==='REDUNDANT'?'on c-green':''}" onclick="setSecMode('${d.id}','REDUNDANT')">REDUNDANT</button>
+        <button class="${d.secMode==='DAISY'?'on c-gray':''}" onclick="setSecMode('${d.id}','DAISY')">DAISY CHAIN</button>
+      </div>
+      <span style="font-family:var(--mono);font-size:10px;color:${wired2?(d.secMode==='DAISY'?'var(--red)':'var(--green)'):'var(--faintsolid)'}">${wired2?(d.secMode==='DAISY'?'冗長配線中に危険!':'両系配線済'):'S系未配線'}</span></div>`;
+    const owners=Object.entries(sys.ha).filter(([c,l])=>l.includes(d.id)).map(([c])=>sys.devices[c].name);
+    h+=`<div class="prop"><span class="pl">HA掌握</span><span style="font-family:var(--mono);font-size:11px;color:${owners.length>1?'var(--red)':'var(--dim)'}">${owners.length?owners.join(', '):'なし'}</span></div>`;
+  }else if(cat==='console'){
+    h+=fsRow(d)+clkRow(d)+ipRow(d);
+    h+=`<div class="prop" style="align-items:flex-start"><span class="pl">マウント<br>(24台まで)</span><div style="flex:1">`;
+    const rios=Object.values(sys.devices).filter(o=>CAT[o.model].cat==='rio');
+    for(const r of rios){
+      const dup=rios.some(o=>o.id!==r.id&&o.unitId===r.unitId);
+      const haOn=(sys.ha[d.id]||[]).includes(r.id);
+      h+=`<div class="mountrow"><span>${r.model} #${r.unitId}</span>
+        <span class="${dup?'st-ng':'st-ok'}">${dup?'✕ ID競合':'✓ mounted'}</span><span class="sp"></span>
+        <button class="ha-tgl${haOn?' on':''}" onclick="toggleHA('${d.id}','${r.id}')">HA ${haOn?'ON':'OFF'}</button></div>`;
+    }
+    h+=`</div></div>`;
+  }else if(cat==='pc'){
+    h+=fsRow(d);
+    h+=`<div class="prop" style="align-items:flex-start"><span class="pl">ネットワーク<br>インターフェース</span><div style="flex:1">
+      <div class="nicrow linkup ${d.nic==='WIRED'?'bound':''}" onclick="setNic('${d.id}','WIRED')">
+        <span class="nled"></span><span class="nname">有線LAN</span>
+        <span class="nip">192.168.10.${d.ipo}</span>
+        <span class="ntag">${d.nic==='WIRED'?'DVSバインド中':'未使用'}</span></div>
+      <div class="nicrow linkup ${d.nic==='WIFI'?'bound warn':''}" onclick="setNic('${d.id}','WIFI')">
+        <span class="nled"></span><span class="nname">Wi-Fi</span>
+        <span class="nip">172.16.0.${d.ipo+9} 別セグ</span>
+        <span class="ntag">${d.nic==='WIFI'?'DVSバインド中':'接続中'}</span></div>
+    </div></div>`;
+    h+=ipRow(d);
+    h+=`<div class="prop" style="color:var(--faint);font-size:11px">両NICともリンクアップ(緑LED)している点に注意 — DVSが「どちらにバインドしているか」(緑/橙の枠)が全て。</div>`;
+  }else if(cat==='avio'){
+    h+=fsRow(d)+clkRow(d)+ipRow(d);
+    h+=`<div class="prop" style="color:var(--faint);font-size:11px">Ultimoチップ: TX2/RX2フロー上限・ポート100M固定。多台数配信の受け口はマルチキャスト+IGMPが前提。</div>`;
+  }else{ // switch
+    h+=`<div class="prop"><span class="pl">系統</span>
+      <span style="font-family:var(--disp);font-size:12px;color:${d.net==='S'?'var(--violet)':'var(--cyan)'}">${d.net==='S'?'SECONDARY (第2系)':'PRIMARY (第1系)'}</span></div>`;
+    h+=`<div class="prop"><span class="pl">DIP: CONFIG</span>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--green)">Dante最適化 ON (QoS/IGMP基本設定)</span></div>`;
+    h+=`<div class="prop"><span class="pl">DIP: VLAN</span>
+      <div class="seg">
+        <button class="${d.dip==='DANTE'?'on c-green':''}" onclick="setDip('${d.id}','DANTE')">プリセットA (標準)</button>
+        <button class="${d.dip==='SPLIT'?'on c-gray':''}" onclick="setDip('${d.id}','SPLIT')">プリセットB (分割)</button>
+      </div></div>`;
+    h+=`<div class="prop"><span class="pl">QoS優先制御</span>
+      <button class="ha-tgl${d.qos?' on':''}" onclick="toggleQos('${d.id}')">${d.qos?'有効 (DSCP)':'無効 (危険)'}</button></div>`;
+    h+=`<div class="prop"><span class="pl">EEE 省電力</span>
+      <button class="ha-tgl${d.eee?' on':''}" style="${d.eee?'border-color:var(--red);color:var(--red);background:#2B1518':''}" onclick="toggleEee('${d.id}')">${d.eee?'有効 (危険)':'無効 (推奨)'}</button></div>`;
+    h+=`<div class="prop" style="align-items:flex-start;flex-direction:column"><span class="pl">ポート / VLAN (LAN Monitor風)</span>${portView(d)}</div>`;
+    h+=`<div class="prop" style="color:var(--faint);font-size:11px">プリセットB(分割)ではアップリンク側ポートが制御VLANに落ちる。隣接スイッチとプリセットが食い違うとそのリンクは遮断。ポートにマウスを乗せると接続先を表示。</div>`;
+  }
+  el.innerHTML=h;
+}
+function clkRow(d){
+  return`<div class="prop"><span class="pl">クロック</span>
+    <select class="sel" onchange="setClk('${d.id}',this.value)">
+    <option value="DANTE"${d.clk==='DANTE'?' selected':''}>Dante (PTP追従)</option>
+    <option value="INT"${d.clk==='INT'?' selected':''}>Internal (内部固定)</option></select></div>`;
+}
+function fsRow(d){
+  return`<div class="prop"><span class="pl">サンプルレート</span>
+    <select class="sel" onchange="setFs('${d.id}',this.value)">
+    <option value="48"${d.fs===48?' selected':''}>48 kHz</option>
+    <option value="96"${d.fs===96?' selected':''}>96 kHz</option></select></div>`;
+}
+window.stepIp=(id,dir)=>{bumpMove();
+  const d=sys.devices[id];
+  d.ipo=Math.min(250,Math.max(2,d.ipo+dir));
+  log('sys',`${d.name} IP → 192.168.10.${d.ipo}`);
+  refresh();
+};
+window.toggleEee=id=>{bumpMove();
+  const d=sys.devices[id];d.eee=!d.eee;
+  log(d.eee?'ng':'ok',`${d.name} EEE(省電力イーサネット) → ${d.eee?'有効 — 無音・低負荷時にリンクが省電力遷移、復帰でドロップの危険':'無効 — Dante用の正解(SWPは工場出荷で無効)'}`);
+  refresh();
+};
+window.setNic=(id,v)=>{bumpMove();
+  const d=sys.devices[id];d.nic=v;
+  log(v==='WIRED'?'ok':'ng',`${d.name} DVSバインド → ${v==='WIRED'?'有線LAN(192.168.10.x) — Danteセグメント':'Wi-Fi(172.16.0.x) — 別サブネット、Dante不達'}`);
+  refresh();
+};
+window.setDip=(id,v)=>{bumpMove();
+  const d=sys.devices[id];d.dip=v;
+  log(v==='DANTE'?'ok':'ng',`${d.name} DIP VLANプリセット → ${v==='DANTE'?'A(標準)':'B(分割)'} — 隣接スイッチと不一致ならリンク遮断`);
+  refresh();
+};
+window.setClk=(id,v)=>{bumpMove();
+  const d=sys.devices[id];d.clk=v;
+  log(v==='DANTE'?'ok':'ng',`${d.name} クロックソース → ${v==='DANTE'?'Dante(PTP追従)':'Internal固定 — PTP無視、クリックノイズ源'}`);
+  refresh();
+};
+window.stepId=(id,dir)=>{bumpMove();
+  const d=sys.devices[id];
+  d.unitId=Math.min(24,Math.max(1,d.unitId+dir));
+  log('sys',`${d.name} UNIT ID → ${d.unitId} (実機は電源OFF時 or SETUPメニューで変更)`);
+  refresh();
+};
+window.setFs=(id,v)=>{bumpMove();
+  const d=sys.devices[id];d.fs=+v;
+  log('sys',`${d.name} サンプルレート → ${v}kHz`);
+  refresh();
+};
+window.toggleHA=(con,rio)=>{bumpMove();
+  const list=sys.ha[con]=sys.ha[con]||[];
+  const i=list.indexOf(rio);
+  if(i>=0){list.splice(i,1);log('sys',`${sys.devices[con].name} が ${sys.devices[rio].name} のHAコントロールを解放`)}
+  else{list.push(rio);log('ok',`${sys.devices[con].name} が ${sys.devices[rio].name} のHAコントロールを取得(リモートゲイン可)`)}
+  refresh();
+};
+
+/* ---------- network settings ---------- */
+function isAvioLink(l){return CAT[sys.devices[l.a].model].cat==='avio'||CAT[sys.devices[l.b].model].cat==='avio'}
+let swSel=null;
+window.selectSw=id=>{swSel=(swSel===id)?null:id;renderNetset()};
+function linkRow(l){
+  const avio=isAvioLink(l),k=linkKey(l);
+  const nm=`${sys.devices[l.a].name} — ${sys.devices[l.b].name}${l.fiber?' <span style="color:var(--violet)">◈</span>':''}`;
+  if(l.loop)return`<div class="linkrow"><span class="nm" style="color:var(--red)">${nm} <b>ループ?</b></span>
+      <button class="spd" style="color:var(--red);border-color:var(--red)" onclick="removeLoopLink('${k}')">撤去</button></div>`;
+  if(l.down)return`<div class="linkrow"><span class="nm" style="color:var(--red)">${nm}</span>
+      <button class="spd" style="color:var(--red);border-color:var(--red)" onclick="reseatLink('${k}')">✕ 断線 — 再接続</button></div>`;
+  const lbl=l.speed===10000?'10G光':l.speed===1000?(l.fiber?'1G光':'1G'):'100M';
+  return`<div class="linkrow"><span class="nm">${nm}</span>
+      ${l.crc?`<button class="spd" style="color:var(--red);border-color:var(--red)" onclick="fixCrc('${k}')">⚠CRC — 交換</button>`:''}
+      ${l.sfpBad?`<button class="spd" style="color:var(--red);border-color:var(--red)" onclick="fixSfp('${k}')">⚠光劣化 — 清掃</button>`:''}
+      <button class="spd ${l.speed>=1000?'g1':'m100'}" ${avio?'disabled style="opacity:.45;cursor:default"':''} onclick="toggleSpeed('${k}')">${avio?'100M固定':lbl}</button></div>`;
+}
+function renderNetset(){
+  const el=document.getElementById('netset');
+  let h=`<div class="prop"><span class="pl">IGMPスヌーピング</span>
+    <button class="ha-tgl${sys.igmp?' on':''}" onclick="toggleIgmp()">${sys.igmp?'ON':'OFF'}</button></div>`;
+  h+=`<div class="prop"><span class="pl">レイテンシ</span>
+    <select class="sel" onchange="setLatency(this.value)">
+    ${[0.25,0.5,1,2,5].map(v=>`<option value="${v}"${sys.latency===v?' selected':''}>${v} ms (目安 SW${LAT_HOPS[v]}段)</option>`).join('')}
+    </select></div>`;
+  h+=`<div class="prop"><span class="pl">IGMPクエリア</span>
+    <button class="ha-tgl${sys.querier?' on':''}" onclick="toggleQuerier()">${sys.querier?'ON (コアSW担当)':'OFF'}</button></div>`;
+  if(swSel&&!sys.devices[swSel])swSel=null;
+  const sws=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='sw');
+  h+=`<div style="font-family:var(--mono);font-size:10px;color:var(--faintsolid);margin:11px 0 6px;letter-spacing:.06em">LINKS — スイッチを選んで点検 (LAN Monitor流)</div>`;
+  h+=`<div class="sw-tabs">${sws.map(s=>`<button class="mx-tab${swSel===s.id?' on':''}" onclick="selectSw('${s.id}')">${s.name}</button>`).join('')}</div>`;
+  if(!swSel){
+    h+=`<div style="font-size:11.5px;color:var(--faintsolid);padding:7px 2px;line-height:1.7">↑ スイッチを選択すると、そのスイッチに刺さっている各リンクの速度と状態(断線 / CRC / 光劣化 / ループ)を点検・修理できる。</div>`;
+  }else{
+    for(const l of sys.links.filter(x=>x.a===swSel||x.b===swSel))h+=linkRow(l);
+  }
+  el.innerHTML=h;
+}
+window.toggleQuerier=()=>{bumpMove();sys.querier=!sys.querier;
+  log(sys.querier?'ok':'ng',sys.querier?'IGMPクエリア有効 — 定期Queryで購読を維持':'IGMPクエリア不在 — 参加情報が失効すればマルチキャスト停止');
+  refresh()};
+window.reseatLink=k=>{bumpMove();
+  const l=sys.links.find(x=>linkKey(x)===k);if(!l)return;
+  l.down=false;
+  log('ok',`リンク ${sys.devices[l.a].name}—${sys.devices[l.b].name} 再接続 — リンクアップ(ラッチの「カチッ」まで確認)`);
+  refresh()};
+window.fixCrc=k=>{bumpMove();
+  const l=sys.links.find(x=>linkKey(x)===k);if(!l)return;
+  delete l.crc;
+  log('ok',`リンク ${sys.devices[l.a].name}—${sys.devices[l.b].name} ケーブル交換 — エラーカウンタ停止、安定`);
+  refresh()};
+window.fixSfp=k=>{bumpMove();
+  const l=sys.links.find(x=>linkKey(x)===k);if(!l)return;
+  delete l.sfpBad;
+  log('ok',`リンク ${sys.devices[l.a].name}—${sys.devices[l.b].name} 光コネクタ清掃/SFP交換 — 瞬断解消`);
+  refresh()};
+window.removeLoopLink=k=>{bumpMove();
+  const i=sys.links.findIndex(x=>linkKey(x)===k&&x.loop);if(i<0)return;
+  const l=sys.links[i];sys.links.splice(i,1);
+  log('ok',`ループ配線 ${sys.devices[l.a].name}—${sys.devices[l.b].name} を撤去 — ストーム収束`);
+  refresh()};
+window.setSecMode=(id,v)=>{bumpMove();
+  const d=sys.devices[id];d.secMode=v;
+  log(v==='REDUNDANT'?'ok':'ng',`${d.name} SECONDARYポート → ${v==='REDUNDANT'?'REDUNDANTモード(冗長)':'デイジーチェーンモード — 冗長配線中は両系を内部ブリッジしてしまう'}`);
+  refresh()};
+window.toggleQos=id=>{bumpMove();
+  const d=sys.devices[id];d.qos=!d.qos;
+  log(d.qos?'ok':'ng',`${d.name} QoS(DSCP優先制御) → ${d.qos?'有効 — PTP最優先送出':'無効 — 混雑時にクロックジッタの危険'}`);
+  refresh()};
+window.fixBadnet=id=>{bumpMove();
+  const d=sys.devices[id];d.badnet=false;
+  log('ok',`${d.name} IP → 192.168.10.${d.ipo} (Danteセグメントへ修正)`);
+  refresh()};
+window.toggleIgmp=()=>{bumpMove();sys.igmp=!sys.igmp;
+  log(sys.igmp?'ok':'ng',sys.igmp?'IGMPスヌーピング有効 — マルチキャストは購読ポートのみへ':'IGMPスヌーピング無効 — マルチキャストは全ポートへフラッディング');
+  refresh()};
+window.setLatency=v=>{bumpMove();sys.latency=+v;log('sys',`Danteレイテンシ → ${v}ms (受信バッファ深さ)`);refresh()};
+window.toggleSpeed=k=>{bumpMove();
+  const l=sys.links.find(x=>linkKey(x)===k);
+  if(isAvioLink(l))return;
+  if(l.fiber)l.speed=l.speed===10000?1000:10000;
+  else l.speed=l.speed===1000?100:1000;
+  const lbl=l.speed===10000?'10Gbps光 (≈5120ch)':l.speed===1000?'1Gbps (≈512ch)':'100Mbps (≈48ch) — 帯域注意';
+  log(l.speed>=1000?'ok':'ng',`リンク ${sys.devices[l.a].name}—${sys.devices[l.b].name} → ${lbl}`);
+  refresh()};
+
+/* ---------- canvas ---------- */
+function devAt(x,y){
+  for(const d of Object.values(sys.devices)){
+    if(Math.abs(x-d.x)<d.w/2+4&&Math.abs(y-d.y)<d.h/2+4)return d.id;
+  }
+  return null;
+}
+let hoverDev=null;
+cv.addEventListener('mousemove',e=>{
+  const r=cv.getBoundingClientRect();
+  const x=(e.clientX-r.left)*W/r.width,y=(e.clientY-r.top)*H/r.height;
+  const d=devAt(x,y);
+  if(d!==hoverDev){hoverDev=d;cv.style.cursor=d?'pointer':'default'}
+});
+cv.addEventListener('click',e=>{
+  const r=cv.getBoundingClientRect();
+  const x=(e.clientX-r.left)*W/r.width,y=(e.clientY-r.top)*H/r.height;
+  selDev=devAt(x,y);
+  renderInspector();
+  if(selDev)openInspector();else closeInspector();
+});
+function loadColor(pct){return pct>1?C.red:pct>0.7?C.amber:'#3A5590'}
+function drawSys(){
+  const{linkLoad}=cachedFlows();
+  const mask=troubleMask(); // 意地悪モード: 画面は答えを教えない
+  ctx.font=`9.5px ${MONO}`;ctx.textAlign='center';
+  for(const l of sys.links){
+    const a=sys.devices[l.a],b=sys.devices[l.b];
+    const reason=blockReason(l);
+    const load=linkLoad[linkKey(l)]||0,cap=linkCap(l),pct=load/cap;
+    const mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
+    if(reason&&!mask){
+      ctx.strokeStyle=C.red;ctx.lineWidth=2.5;ctx.setLineDash([6,5]);
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle=C.red;
+      ctx.fillText(BLOCK_LABEL[reason]||'✕ 遮断',mx,my-7);
+      continue;
+    }
+    // mask中は遮断リンクも「見た目は正常」— ただし流量0chが手掛かり
+    const netv=linkNet(l);
+    ctx.strokeStyle=l.fiber?'#9FA8F0':(netv==='S'?'#7A6BB8':loadColor(pct));
+    if(pct>0.7)ctx.strokeStyle=loadColor(pct);
+    ctx.lineWidth=pct>1?3.5:l.fiber?3:2.5;
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    ctx.fillStyle=pct>1?C.red:pct>0.7?C.amber:C.faint;
+    const spd=l.speed===10000?'◈10G光':l.speed===100?'⚠100M':(l.fiber?'◈1G光':'');
+    ctx.fillText(`${netv==='S'?'S ':'P '}${load}ch/${cap}ch ${spd}`,mx,my-7);
+    if(l.loop&&!mask){ctx.fillStyle=C.red;ctx.fillText('⚠ ループ配線',mx,my+16)}
+    if((l.crc||l.sfpBad)&&!mask){ctx.fillStyle=C.red;ctx.fillText(l.crc?'⚠ CRCエラー':'⚠ 光劣化',mx,my+16)}
+  }
+  for(const d of Object.values(sys.devices)){
+    const cat=CAT[d.model].cat;
+    const x=d.x-d.w/2,y=d.y-d.h/2;
+    const dup=!mask&&cat==='rio'&&Object.values(sys.devices).some(o=>o.id!==d.id&&CAT[o.model].cat==='rio'&&o.unitId===d.unitId);
+    const intClk=!mask&&d.clk==='INT';
+    const wifi=!mask&&cat==='pc'&&d.nic==='WIFI';
+    ctx.fillStyle=C.panel;
+    ctx.strokeStyle=d.id===selDev?C.cyan:(dup||intClk||wifi)?C.red:C.line;
+    ctx.lineWidth=(d.id===selDev||dup||intClk||wifi)?1.8:1.1;
+    ctx.beginPath();ctx.roundRect(x,y,d.w,d.h,7);ctx.fill();ctx.stroke();
+    if(d.id===hoverDev&&d.id!==selDev){
+      ctx.strokeStyle='rgba(76,201,240,.35)';ctx.lineWidth=3;
+      ctx.beginPath();ctx.roundRect(x-3,y-3,d.w+6,d.h+6,9);ctx.stroke();
+    }
+    ctx.textAlign='left';
+    ctx.font=`600 ${cat==='avio'?10.5:12}px ${MONO}`;ctx.fillStyle=C.ink;ctx.fillText(d.name,x+9,y+(cat==='avio'?17:21));
+    ctx.font=`9px ${MONO}`;ctx.fillStyle=C.dim;
+    let sub=d.model;
+    if(!mask){ // 通常時のみ設定値を表示。TROUBLE中は自分でクリックして確認せよ
+      if(cat==='rio')sub+=` #${d.unitId}`;
+      if(cat!=='sw')sub+=` ${d.fs}k`;
+    }
+    ctx.fillText(sub,x+9,y+(cat==='avio'?31:36));
+    if(dup){ctx.font=`600 9px ${MONO}`;ctx.fillStyle=C.red;ctx.fillText('ID競合',x+9,y-6)}
+    if(intClk){ctx.font=`600 9px ${MONO}`;ctx.fillStyle=C.red;ctx.fillText('INT CLK',x+d.w-48,y-6)}
+    if(wifi){ctx.font=`600 9px ${MONO}`;ctx.fillStyle=C.red;ctx.fillText('Wi-Fi?!',x+d.w-46,y-6)}
+    if(cat==='sw'){
+      ctx.font=`600 9px ${MONO}`;
+      ctx.fillStyle=d.net==='S'?C.violet:C.cyan;
+      ctx.fillText(d.net==='S'?'[SEC]':'[PRI]',x+d.w-38,y-6);
+      if(!mask){
+        ctx.font=`9px ${MONO}`;ctx.fillStyle=d.dip==='SPLIT'?C.amber:C.faint;
+        ctx.fillText(`DIP:${d.dip==='SPLIT'?'B分割':'A標準'}`,x+9,y+d.h+13);
+      }
+    }
+    if(cat==='rio'&&!mask){
+      const owners=Object.entries(sys.ha).filter(([c,l])=>l.includes(d.id));
+      if(owners.length>1){ctx.font=`600 9px ${MONO}`;ctx.fillStyle=C.red;ctx.fillText('HA競合',x+d.w-46,y-6)}
+    }
+  }
+  ctx.textAlign='left';
+  ctx.font=`10px ${MONO}`;ctx.fillStyle=C.faint;
+  ctx.fillText(`IGMP: ${sys.igmp?'ON':'OFF'}   LATENCY: ${sys.latency}ms${mask?'   [調査モード: 機器の設定はクリックして自分で確認]':''}`,16,H-12);
+}
+/* flow cache for animation */
+let _fc=null,_fcDirty=true;
+function cachedFlows(){if(_fcDirty){_fc=computeFlows();_fcDirty=false}return _fc}
+function flowPaths(){
+  const{flows}=cachedFlows();
+  const out=[];
+  for(const f of flows){
+    if(f.error)continue;
+    for(const r of f.rx){
+      for(const net of ['P','S']){
+        const links=routeNet(f.tx,r,net);if(!links)continue;
+        const seq=[f.tx];let cur=f.tx;
+        for(const l of links){cur=(l.a===cur)?l.b:l.a;seq.push(cur)}
+        out.push({pts:seq.map(id=>({x:sys.devices[id].x,y:sys.devices[id].y})),
+          color:f.mcast?C.red:(net==='S'?'#9E8FE0':C.cyan)});
+      }
+    }
+  }
+  return out;
+}
+let _paths=[],spawnIdx=0,spawnAcc=0;
+function pathLen(p){let L=0;for(let i=1;i<p.length;i++)L+=Math.hypot(p[i].x-p[i-1].x,p[i].y-p[i-1].y);return L}
+function pointAt(p,t){
+  const tot=pathLen(p);let d=t*tot;
+  for(let i=1;i<p.length;i++){
+    const s=Math.hypot(p[i].x-p[i-1].x,p[i].y-p[i-1].y);
+    if(d<=s)return{x:p[i-1].x+(p[i].x-p[i-1].x)*(d/s),y:p[i-1].y+(p[i].y-p[i-1].y)*(d/s)};
+    d-=s;
+  }
+  return p[p.length-1];
+}
+
+/* ---------- explain ---------- */
+document.getElementById('explain').innerHTML=`
+<b>遊び方の骨子</b><br>
+①<b>CHALLENGE</b>: 診断(先生)を見ながらERROR/WARNを全部消してALL GREENに。
+②<b>TROUBLE</b>: 診断は封印。<span class="kw">現場報告</span>だけを頼りに、リンク負荷・マトリクスの✕・インスペクタから原因を推理して直す。クリア時に答え合わせ。
+③新要素: <span class="kw">SWP2光10Gトランク(◈)</span> / <span class="kw">DIP VLANプリセット</span>(不一致でリンク遮断) / <span class="kw">AVIO(Ultimo)</span>はTX2・RX2フロー+100M固定 / <span class="kw">クロックソース</span>(Internal固定はクリックノイズ源) / IGMP OFF時のマルチキャストは<b>全リンクにフラッディング加算</b>。
+④TROUBLE中は<b>キャンバスが答えを隠す</b>: バッジ・ID・レート・DIP表示は消え、遮断リンクも見た目は正常。<span class="kw">機器をクリックして自分の目で確認</span>する癖をつけろ。
+⑤新障害: <span class="kw">DVSのWi-Fi誤バインド</span> — PCは「ネット繋がってるから正常」と主張するが、DVSは別サブネットの172.16.0.xに居る。REC PCのインスペクタでバインド先を確認。
+⑥新障害: <span class="kw">EEE(省電力イーサ)</span> — 無音時ほど途切れる怪奇現象の正体 / <span class="kw">IPアドレス重複</span> — 見えたり消えたりの定番。どちらもインスペクタで発見・修正。
+⑦スイッチをクリックすると<b>LAN Monitor風ポートビュー</b>: どのポートがどのVLANか色で分かる。DIP変更も即反映。PCのインスペクタは<b>NIC一覧</b>(両方リンクアップ! バインド先の枠色が全て)。
+⑧クリアすると<b>MISSION DEBRIEF</b>(リザルト画面): 各障害の<span class="kw">症状→切り分け→対処→現場メモ</span>を解説。パズルの答え合わせが、そのまま現場の教科書になる。
+⑨<b>全システム冗長化(Primary/Secondary)</b>: 片系が死んでも音は止まらない — だから「音は出ているが冗長性を失っている」<span class="kw">冗長性喪失WARN</span>を見逃すな。DVS/AVIOはPrimaryのみ(実機仕様)。
+⑩新障害: <span class="kw">Secondaryモード誤設定</span> — デイジーチェーン残留のRioが機器内部で両系をブリッジし、両系まとめて不安定化。システム3種 × 難易度4 × <b>障害20種</b>(CRCエラー・光リンク劣化を追加) × ランダム出題 — 現場報告には<b>間違った仮説を口走る目撃者</b>も混ざる。症状を信じ、仮説を疑え。`;
+
+/* ---------- refresh / preset ---------- */
+function refresh(){
+  _fcDirty=true;
+  _paths=flowPaths();
+  const _items=runDiag();challengeCheck(_items);
+  renderMatrix();renderMatrixTabs();
+  renderInspector();renderNetset();
+}
+function assignIPs(){
+  let o=11;
+  for(const d of Object.values(sys.devices))d.ipo=o++;
+}
+function devIP(d){if(d.badnet)return`192.168.1.${d.ipo}`;return CAT[d.model].cat==='pc'&&d.nic==='WIFI'?`172.16.0.${d.ipo+9}`:`192.168.10.${d.ipo}`}
+function loadPreset(k){
+  abortChallenge();
+  presetKey=k;
+  sys=PRESETS[k].build();
+  if(sys.querier===undefined)sys.querier=true;
+  const _ip=document.getElementById('ins-panel');if(_ip)_ip.classList.remove('open');
+  selDev=null;packets=[];
+  assignIPs();
+  rxSel=rxDevices()[0].id;
+  document.getElementById('sys-title').innerHTML='TOPOLOGY<span class="desc">'+PRESETS[k].title+'</span>';
+  document.querySelectorAll('#preset-tabs .tab').forEach(b=>b.classList.toggle('on',b.dataset.preset===k));
+  log('sys',`プリセット読込: <b>${PRESETS[k].title}</b>`);
+  refresh();
+}
+document.getElementById('preset-tabs').addEventListener('click',e=>{
+  const b=e.target.closest('.tab');if(b)loadPreset(b.dataset.preset);
+});
+
+/* ---------- loop ---------- */
+function tick(now){
+  const dt=Math.min(now-last,80);last=now;simT+=dt;
+  // spawn packets round-robin over active flow paths
+  spawnAcc+=dt;
+  if(_paths.length&&spawnAcc>Math.max(90,700/_paths.length)){
+    spawnAcc=0;
+    const p=_paths[spawnIdx++%_paths.length];
+    if(packets.length<40)packets.push({pts:p.pts,color:p.color,t:0,len:pathLen(p.pts)});
+  }
+  for(const p of packets)p.t+=(200*dt/1000)/p.len;
+  packets=packets.filter(p=>p.t<1);
+  // render
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='rgba(168,190,235,.07)';
+  for(let x=20;x<W;x+=40)for(let y=20;y<H;y+=40)ctx.fillRect(x,y,1.5,1.5);
+  drawSys();
+  updateChallengeClock();
+  for(const p of packets){
+    const pos=pointAt(p.pts,p.t);
+    ctx.shadowColor=p.color;ctx.shadowBlur=7;
+    ctx.fillStyle=p.color;
+    ctx.beginPath();ctx.arc(pos.x,pos.y,3.6,0,7);ctx.fill();
+    ctx.shadowBlur=0;
+  }
+  requestAnimationFrame(tick);
+}
+/* ============ CHALLENGE MODE — 欠陥注入エンジン(リンタの逆関数) ============ */
+var challenge={active:false,t0:0,seed:0,moves:0,flaws:0,cleared:false,suspend:false};
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function _rios(){return Object.values(sys.devices).filter(d=>CAT[d.model].cat==='rio')}
+function _cons(){return Object.values(sys.devices).filter(d=>CAT[d.model].cat==='console')}
+function _pick(r,arr){return arr[Math.floor(r()*arr.length)]}
+function countEW(items){return items.filter(i=>i.s==='E'||i.s==='W').length}
+function silentDiagCount(){
+  // runDiag renders too, but that's harmless during setup
+  return countEW(runDiag());
+}
+function maxHops(){
+  const{flows}=computeFlows();let mx=0;
+  for(const f of flows){if(f.error)continue;
+    for(const r of f.rx){const rt=route(f.tx,r)||[];const sws=new Set();
+      for(const l of rt)for(const e of [l.a,l.b])if(CAT[sys.devices[e].model].cat==='sw')sws.add(e);
+      mx=Math.max(mx,sws.size)}}
+  return mx;
+}
+/* 欠陥カタログ: inject は undo関数 or false を返す */
+const FLAWS=[
+ {id:'iddup',name:'UNIT ID重複',
+  ap:()=>_rios().length>=2,
+  inject(r){const rs=_rios();const a=_pick(r,rs);const cand=rs.filter(x=>x!==a);if(!cand.length)return false;
+    const b=_pick(r,cand);const old=b.unitId;if(old===a.unitId)return false;
+    b.unitId=a.unitId;return()=>b.unitId=old}},
+ {id:'hadup',name:'HA二重掌握',
+  ap:()=>_cons().length>=2&&_rios().length>=1,
+  inject(r){const rio=_pick(r,_rios());
+    const owner=Object.keys(sys.ha).find(c=>(sys.ha[c]||[]).includes(rio.id));
+    const other=_cons().find(c=>c.id!==owner);
+    if(!other||(sys.ha[other.id]||[]).includes(rio.id))return false;
+    (sys.ha[other.id]=sys.ha[other.id]||[]).push(rio.id);
+    return()=>{const l=sys.ha[other.id];l.splice(l.indexOf(rio.id),1)}}},
+ {id:'slow',name:'リンク100M降格',
+  ap:()=>sys.links.length>=1,
+  inject(r){const{linkLoad}=computeFlows();
+    const loaded=sys.links.filter(l=>l.speed===1000&&!l.fiber&&!isAvioLink(l)&&(linkLoad[linkKey(l)]||0)>0)
+      .sort((a,b)=>(linkLoad[linkKey(b)]||0)-(linkLoad[linkKey(a)]||0));
+    if(!loaded.length)return false;
+    const l=loaded[0];l.speed=100;return()=>l.speed=1000}},
+ {id:'igmp',name:'IGMP OFF×マルチキャスト',
+  ap:()=>true,
+  inject(r){const groups={};
+    for(const[k,v]of Object.entries(sys.subs)){const gk=v.tx+':'+v.bank;(groups[gk]=groups[gk]||new Set()).add(k.split(':')[0])}
+    const multi=Object.entries(groups).filter(([g,s])=>s.size>=2&&!sys.mcast[g]);
+    if(!multi.length||!sys.igmp)return false;
+    const[gk]=_pick(r,multi);sys.mcast[gk]=true;sys.igmp=false;
+    return()=>{delete sys.mcast[gk];sys.igmp=true}}},
+ {id:'fs',name:'サンプルレート不一致',
+  ap:()=>true,
+  inject(r){const involved=new Set();
+    for(const[k,v]of Object.entries(sys.subs)){involved.add(k.split(':')[0]);involved.add(v.tx)}
+    const cand=[...involved].map(id=>sys.devices[id]).filter(d=>d&&d.fs===48);
+    if(!cand.length)return false;
+    const d=_pick(r,cand);d.fs=96;return()=>d.fs=48}},
+ {id:'lat',name:'レイテンシ過浅',
+  ap:()=>maxHops()>=2,
+  inject(r){if(sys.latency<=0.25)return false;const old=sys.latency;sys.latency=0.25;return()=>sys.latency=old}},
+ {id:'dip',name:'スイッチDIP不一致',
+  ap:()=>sys.links.some(l=>CAT[sys.devices[l.a].model].cat==='sw'&&CAT[sys.devices[l.b].model].cat==='sw'),
+  inject(r){const cands=sys.links.filter(l=>CAT[sys.devices[l.a].model].cat==='sw'&&CAT[sys.devices[l.b].model].cat==='sw'&&!linkBlocked(l));
+    if(!cands.length)return false;
+    const l=_pick(r,cands);const sw=sys.devices[r()<.5?l.a:l.b];
+    const old=sw.dip;sw.dip='SPLIT';
+    return()=>sw.dip=old}},
+ {id:'clk',name:'クロックソース不整合',
+  ap:()=>true,
+  inject(r){const involved=new Set();
+    for(const[k,v]of Object.entries(sys.subs)){involved.add(k.split(':')[0]);involved.add(v.tx)}
+    const cands=[...involved].map(id=>sys.devices[id]).filter(d=>d&&['console','rio','avio'].includes(CAT[d.model].cat)&&d.clk==='DANTE');
+    if(!cands.length)return false;
+    const d=_pick(r,cands);d.clk='INT';return()=>d.clk='DANTE'}},
+ {id:'eee',name:'EEE有効化',
+  ap:()=>Object.values(sys.devices).some(d=>CAT[d.model].cat==='sw'),
+  inject(r){const sws=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='sw'&&!d.eee);
+    if(!sws.length)return false;
+    const d=_pick(r,sws);d.eee=true;return()=>d.eee=false}},
+ {id:'ip',name:'IPアドレス重複',
+  ap:()=>Object.values(sys.devices).filter(d=>CAT[d.model].cat!=='sw').length>=2,
+  inject(r){const ds=Object.values(sys.devices).filter(d=>CAT[d.model].cat!=='sw');
+    if(ds.length<2)return false;
+    const a=_pick(r,ds);const cand=ds.filter(x=>x!==a&&x.ipo!==a.ipo);
+    if(!cand.length)return false;
+    const b=_pick(r,cand);const old=b.ipo;b.ipo=a.ipo;return()=>b.ipo=old}},
+ {id:'daisy',name:'Secondaryモード誤設定',
+  ap:()=>Object.values(sys.devices).some(d=>CAT[d.model].cat==='rio'&&hasAnySLinkRaw(d.id)),
+  inject(r){const cands=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='rio'&&hasAnySLinkRaw(d.id)&&d.secMode==='REDUNDANT');
+    if(!cands.length)return false;
+    const d=_pick(r,cands);d.secMode='DAISY';return()=>d.secMode='REDUNDANT'}},
+ {id:'cable',name:'ケーブル断線',
+  ap:()=>sys.links.length>=1,
+  inject(r){const{linkLoad}=computeFlows();
+    const cands=sys.links.filter(l=>!l.down&&!l.loop&&(linkLoad[linkKey(l)]||0)>0);
+    if(!cands.length)return false;
+    const l=_pick(r,cands);l.down=true;return()=>l.down=false}},
+ {id:'loop',name:'スイッチループ配線',
+  ap:()=>{const sws=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='sw');
+    for(let i=0;i<sws.length;i++)for(let j=i+1;j<sws.length;j++){
+      const a=sws[i],b=sws[j];
+      if(a.net===b.net&&!sys.links.some(l=>(l.a===a.id&&l.b===b.id)||(l.a===b.id&&l.b===a.id))&&routeNet(a.id,b.id,a.net))return true}
+    return false},
+  inject(r){const sws=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='sw');
+    const pairs=[];
+    for(let i=0;i<sws.length;i++)for(let j=i+1;j<sws.length;j++){
+      const a=sws[i],b=sws[j];
+      if(a.net===b.net&&!sys.links.some(l=>(l.a===a.id&&l.b===b.id)||(l.a===b.id&&l.b===a.id))&&routeNet(a.id,b.id,a.net))pairs.push([a.id,b.id])}
+    if(!pairs.length)return false;
+    const[a,b]=_pick(r,pairs);
+    const l={a,b,speed:1000,loop:true};sys.links.push(l);
+    return()=>{const i=sys.links.indexOf(l);if(i>=0)sys.links.splice(i,1)}}},
+ {id:'qos',name:'QoS無効化',
+  ap:()=>Object.values(sys.devices).some(d=>CAT[d.model].cat==='sw'),
+  inject(r){const sws=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='sw'&&d.qos);
+    if(!sws.length)return false;
+    const d=_pick(r,sws);d.qos=false;return()=>d.qos=true}},
+ {id:'querier',name:'IGMPクエリア不在',
+  ap:()=>sys.igmp,
+  inject(r){if(!sys.querier)return false;
+    const groups={};
+    for(const[k,v]of Object.entries(sys.subs)){const gk=v.tx+':'+v.bank;(groups[gk]=groups[gk]||new Set()).add(k.split(':')[0])}
+    let made=null;
+    if(!Object.keys(sys.mcast).length){
+      const multi=Object.entries(groups).filter(([g,s])=>s.size>=2&&!sys.mcast[g]);
+      if(!multi.length)return false;
+      made=_pick(r,multi)[0];sys.mcast[made]=true}
+    sys.querier=false;
+    return()=>{sys.querier=true;if(made)delete sys.mcast[made]}}},
+ {id:'subnet',name:'静的IP誤セグメント',
+  ap:()=>true,
+  inject(r){const involved=new Set();
+    for(const[k,v]of Object.entries(sys.subs)){involved.add(k.split(':')[0]);involved.add(v.tx)}
+    const cands=[...involved].map(id=>sys.devices[id]).filter(d=>d&&['rio','avio'].includes(CAT[d.model].cat)&&!d.badnet);
+    if(!cands.length)return false;
+    const d=_pick(r,cands);d.badnet=true;return()=>d.badnet=false}},
+ {id:'crc',name:'ケーブル品質不良',
+  ap:()=>sys.links.some(l=>!l.fiber),
+  inject(r){const{linkLoad}=computeFlows();
+    const cands=sys.links.filter(l=>!l.fiber&&!l.down&&!l.loop&&!l.crc&&(linkLoad[linkKey(l)]||0)>0);
+    if(!cands.length)return false;
+    const l=_pick(r,cands);l.crc=true;return()=>delete l.crc}},
+ {id:'sfp',name:'光リンク劣化',
+  ap:()=>sys.links.some(l=>l.fiber),
+  inject(r){const{linkLoad}=computeFlows();
+    const cands=sys.links.filter(l=>l.fiber&&!l.down&&!l.sfpBad&&(linkLoad[linkKey(l)]||0)>0);
+    if(!cands.length)return false;
+    const l=_pick(r,cands);l.sfpBad=true;return()=>delete l.sfpBad}},
+ {id:'nic',name:'DVS Wi-Fi誤バインド',
+  ap:()=>Object.values(sys.devices).some(d=>CAT[d.model].cat==='pc'),
+  inject(r){const pcs=Object.values(sys.devices).filter(d=>CAT[d.model].cat==='pc'&&d.nic==='WIRED');
+    if(!pcs.length)return false;
+    const d=_pick(r,pcs);d.nic='WIFI';return()=>d.nic='WIRED'}},
+ {id:'fan',name:'ユニキャスト多重配信',
+  ap:()=>true,
+  inject(r){const groups={};
+    for(const[k,v]of Object.entries(sys.subs)){const gk=v.tx+':'+v.bank;(groups[gk]=groups[gk]||new Set()).add(k.split(':')[0])}
+    const cands=Object.entries(groups).filter(([g,s])=>!sys.mcast[g]&&s.size>=1&&s.size<3);
+    if(!cands.length)return false;
+    const[gk,have]=_pick(r,cands);const[tx,bank]=gk.split(':');
+    const added=[];
+    for(const rx of rxDevices()){
+      if(rx.id===tx)continue; // 自己購読は現場でしない
+      if(have.size+added.length>=3)break;
+      if(have.has(rx.id)||rx.id===tx)continue;
+      // 空きRXバンクを探す
+      for(let b=0;b<banks(CAT[rx.model].rx);b++){
+        const k=rx.id+':'+b;
+        if(!sys.subs[k]){sys.subs[k]={tx,bank:+bank};added.push(k);break}
+      }
+    }
+    if(have.size+added.length<3){for(const k of added)delete sys.subs[k];return false}
+    return()=>{for(const k of added)delete sys.subs[k]}}},
+];
+/* プリセットを正規化してクリーン状態から始める */
+function loadCleanPreset(k){
+  challenge.suspend=true;
+  presetKey=k;sys=PRESETS[k].build();selDev=null;packets=[];
+  // normalize
+  let uid=1;for(const d of _rios())d.unitId=uid++;
+  const seen=new Set();
+  for(const c of Object.keys(sys.ha)){sys.ha[c]=(sys.ha[c]||[]).filter(rid=>{if(seen.has(rid))return false;seen.add(rid);return true})}
+  for(const l of sys.links)l.speed=l.fiber?10000:(isAvioLink(l)?100:1000);
+  sys.igmp=true;sys.latency=1;
+  for(const d of Object.values(sys.devices)){d.fs=48;d.clk='DANTE';d.dip='DANTE';d.nic='WIRED';d.eee=false;d.qos=true;d.badnet=false;d.secMode='REDUNDANT'}
+  sys.querier=true;
+  sys.links=sys.links.filter(l=>!l.loop&&linkNet(l)!=='X');
+  for(const l of sys.links){l.down=false;delete l.crc;delete l.sfpBad}
+  // ベストプラクティス正規化: 3台以上への配信と、Ultimo(フロー上限2)超過はマルチキャスト化
+  const groups={};
+  for(const[k,v]of Object.entries(sys.subs)){const gk=v.tx+':'+v.bank;(groups[gk]=groups[gk]||new Set()).add(k.split(':')[0])}
+  const txCnt={};
+  for(const[gk,s]of Object.entries(groups))txCnt[gk.split(':')[0]]=(txCnt[gk.split(':')[0]]||0)+s.size;
+  for(const[gk,s]of Object.entries(groups)){
+    const tx=gk.split(':')[0];
+    if(s.size>=3||txCnt[tx]>flowLimit(sys.devices[tx].model))sys.mcast[gk]=true;
+  }
+  assignIPs();
+  rxSel=rxDevices()[0].id;
+  document.getElementById('sys-title').innerHTML='TOPOLOGY<span class="desc">'+PRESETS[k].title+' (正規化済み)</span>';
+  document.querySelectorAll('#preset-tabs .tab').forEach(b=>b.classList.toggle('on',b.dataset.preset===k));
+  challenge.suspend=false;
+}
+const DIFF={1:{flaws:2,tflaws:1,label:'★1'},2:{flaws:3,tflaws:2,label:'★2'},3:{flaws:5,tflaws:3,label:'★3'},4:{flaws:7,tflaws:4,label:'★4鬼'}};
+const EXPLAIN_DB={
+ iddup:{i:'コンソールのマウント一覧を開き、同型番・同IDが並んでいないか確認。実機ではDante Controllerのデバイス名(Y0xx-Yamaha-…)が同名で揺れる、I/O RACKの表示が入れ替わる等で気づく',
+  f:'片方のUNIT IDを空き番号へ変更(D2系は本体SETUPメニュー。1〜24)',
+  m:'搬入前にID台帳を作り、機体にID表記のテプラ。レンタル混在現場は特に'},
+ hadup:{i:'「勝手にゲインが動く」→ 対象Rioを特定 → そのRioのHA掌握卓を列挙(各コンソールのマウント画面)。2卓以上ならビンゴ',
+  f:'HAコントロール権を1卓(通常FOH)に集約',
+  m:'FOH/MON分業はゲインコンペンセーション運用が定石。本番前に「HA触るのは誰か」を口頭確認'},
+ slow:{i:'症状の出る系統の経路を上流へ辿り、各リンクの負荷(ch数)と速度表記を確認。実機ではLAN MonitorのトラフィックグラフやスイッチのリンクLED(橙=100M/緑=1G)',
+  f:'リンクを1Gへ増速、またはマルチキャスト化で本数削減',
+  m:'「中継用に借りた古いHUB」「壁内の古い配線」が100Mボトルネックの定番'},
+ igmp:{i:'マルチキャスト使用の有無を確認 → スイッチのIGMPスヌーピング設定 → 無関係な100M機器(AVIO等)の負荷を見る。全リンクに同じ負荷が乗っていたらフラッディング',
+  f:'IGMPスヌーピングをON(クエリアも1台必要)',
+  m:'SWPはDIP最適化でON済みが本来。汎用スイッチを混ぜた時が危ない'},
+ fs:{i:'マトリクスの✕が特定デバイス宛に集中していないか見る → そのデバイスのサンプルレートを確認',
+  f:'ネットワーク全体でレートを統一(Dante網は単一クロックドメイン=単一レート)',
+  m:'96kHz案件の翌日、DVSやコンソールの戻し忘れが定番。仕込み初手にレート確認'},
+ lat:{i:'「遠い系統ほど出る」が鍵。経路のスイッチ段数を数え、レイテンシ設定の目安と照合。実機はDante Controllerのレイテンシモニタでヒストグラムの右端張り付きを見る',
+  f:'レイテンシを1段深く(0.25msは同一スイッチ内限定と心得る)',
+  m:'困ったら1ms。詰めるのはシステムが安定してから'},
+ dip:{i:'「あるスイッチ配下だけ全滅」= 境界障害のサイン。両スイッチのポートビューを開き、トランクポートのVLAN色を見比べる',
+  f:'DIPのVLANプリセットを隣接スイッチと統一',
+  m:'レンタル機混在時は電源投入前にDIPの写真を撮る習慣を'},
+ clk:{i:'症状が1台に限定 → その機器のクロック設定を確認。実機はDante Controllerのクロックステータス(Sync/Mute表示)',
+  f:'Dante(PTP追従)へ戻す。外部WCLK基準はGM側をWCLKスレーブに、他は必ずPTP',
+  m:'外部機器連携(映像同期等)の設定変更が残留しがち'},
+ nic:{i:'「PCだけ全✕・本人は繋がってると主張」→ NIC一覧を開く。両方リンクアップでも、DVSのバインド先IPが172.16.0.x(別セグ)ならそれが犯人',
+  f:'DVS/Dante Controllerのインターフェースを有線NICへ。Wi-Fiは無効化',
+  m:'現場PCは物理スイッチかOS設定でWi-Fiを切ってから持ち込む'},
+ eee:{i:'「無音・低負荷ほど途切れる」という逆説が最大のヒント。省電力機能がリンクをスリープさせている → スイッチのEEE設定を確認',
+  f:'EEE(Energy Efficient Ethernet)を無効化',
+  m:'汎用スイッチは工場出荷でEEE有効が多い。Dante用途は必ず無効、SWPは最初から無効'},
+ ip:{i:'「見えたり消えたり・再起動直後だけ直る」= ARP揺れの典型 → 全デバイスのIPを一覧確認(実機はDante ControllerのDevice Info列)して重複を探す',
+  f:'重複しているどちらかのIPを変更',
+  m:'静的割当は台帳管理が命。可能ならDHCP一元管理で人為ミスを消す'},
+ cable:{i:'リンクLED消灯を探す(ポートビュー右上●)。冗長系では片系断だと音が出続けるため、音を聞いても気づけない — 診断の「冗長性喪失」表示とLED巡回だけが頼り',
+  f:'ケーブル再接続。etherCONはラッチの「カチッ」まで。復旧後に両系到達を再確認',
+  m:'冗長は「壊れた時に初めて仕事をする」。本番前のLED巡回・冗長ステータス確認を儀式に'},
+ daisy:{i:'「その機器を繋ぐと全体悪化・抜くと直る」は機器内ブリッジの署名。RioのSECONDARYポートモードを確認',
+  f:'SECONDARYをREDUNDANTモードへ(D2系はSETUPメニュー、要再起動)',
+  m:'デイジーチェーン現場帰りの機体はモード残留が定番。レンタル受入チェックリストに1行追加'},
+ loop:{i:'「全系統が同時に・原因不明で」はストームの署名。全リンクの負荷が一様に異常膨張していないか見る。実機はスイッチの全ポートLEDが狂ったように明滅する',
+  f:'余分な結線を特定して撤去。SWPのループ検知機能を有効化しておく',
+  m:'犯人は大抵「余ってたから挿しといた」の善意。結線変更は必ず申告制に'},
+ qos:{i:'「負荷が上がった時だけ」が鍵。QoSが効いていればPTPは混雑の影響を受けない。各スイッチのQoS設定を確認',
+  f:'DSCP優先制御を有効化(PTP=CS7最優先、音声=EF)',
+  m:'SWPは出荷時設定済み。初期化やファーム更新後の戻し忘れ、汎用SW混入を疑う'},
+ querier:{i:'「数分後に消える」はIGMP参加情報のタイムアウト(約2〜5分)と一致する時限性。スヌーピングONでもクエリアが居なければ購読は維持されない',
+  f:'ネットワークに必ず1台クエリアを(通常コアスイッチ)',
+  m:'リハの短時間では気づけない罠。マルチキャスト現場は本番前のクエリア確認を儀式に'},
+ subnet:{i:'「電源もリンクも生きてるのに見えない」→ L3を疑う。その機器のIP表示を開き、192.168.1.x等の別セグメントに居ないか確認',
+  f:'Danteセグメント(本ラボは192.168.10.x)へ静的IPを修正',
+  m:'前現場の設定が残ったレンタル機の定番。受け取り時のIP確認をルーチン化'},
+ crc:{i:'「揺らすと変わる」「日によって違う」は物理層品質の署名。スイッチのエラーカウンタ(CRC)を確認。規格不足(CAT5)・距離超過・コネクタ損傷を疑う',
+  f:'ケーブル交換(CAT5e以上・100m以内・中継コネクタ撤去)',
+  m:'疑わしいケーブルは修理せず廃棄が正解。LANテスターを工具箱の定位置に'},
+ sfp:{i:'光の瞬断は「コネクタ汚れ・曲げ半径・モジュール劣化」の三択から。エラーカウンタと光レベルを確認',
+  f:'光コネクタ清掃、改善なければSFPモジュール交換。敷設の曲げ半径も点検',
+  m:'光は「挿す前に必ず清掃」が鉄則。清掃キットは幹線ケーブルと同じケースに入れておく'},
+ fan:{i:'TXデバイスのフロー数表示(n/32やn/2)を確認。同一バンクの受信者数が3台以上ならユニキャストの限界が近い',
+  f:'該当TXバンクをマルチキャスト化(+IGMP前提)',
+  m:'Audinate指針: 受信3台以上でマルチキャスト検討。Ultimo機はTX2本しかないので即決'},
+};
+const SYMPTOM={
+ iddup:['コンソールのI/O RACK画面で同型Rioの区別が怪しい。HAゲインを触ったら別のラックの入力が動いた気がする',
+  'モニター卓から「1chのゲイン上げて」と言われて上げたら、なぜか別ステージ側の音が変わったと苦情が来た',
+  'Dante Controllerに同じ名前のデバイスが2つ見えたり、片方だけ消えたりしている',
+  '「幽霊が出る」と言い出す者まで現れた。触っていないゲインが動くのだから無理もない'],
+ hadup:['サウンドチェック中、誰も触っていないのに入力ゲインがひとりでに動く',
+  'FOHは「勝手にHAが下がる」と言い、MONは「上げた覚えはない」と言う。互いに疑心暗鬼になっている',
+  'リハ録音を聞き返すと、途中で入力レベルが不自然に段付きで変わっている箇所がある'],
+ slow:['特定の系統だけ断続的に音が途切れる。チャンネル数を増やすと悪化する',
+  '転換で回線を追加した直後から、ある系統だけブツブツ言い始めた',
+  '本番は平気なのに、全回線を流すゲネプロの時だけ特定系統が崩れる',
+  '「回線を半分に減らしたら直った」という応急処置報告が来ている。根本原因は不明のまま',
+  '「無線マイクの混信じゃないか」と睨んでいる人がいるが、有線の回線でも同じ症状が出ている'],
+ igmp:['小型のDante機器を繋いだあたりからネットワーク全体が重く不安定',
+  '頼んでもいない音声トラフィックが、無関係な機器にまで流れ込んでいるように見える',
+  '関係ないはずの機器まで、リンクLEDが全部激しく点滅している'],
+ fs:['ある機器宛のパッチだけ全部✕になって通らない',
+  '昨日の96kHz案件から戻ってきた機材だけ、今日は一切パッチが通らない',
+  '「何回パッチしても✕なんだけど、俺の操作ミス?」とオペが自信を失いかけている',
+  '「ケーブルが長すぎるのでは」と言われたが、隣の同じ長さの機器は普通に通っている'],
+ lat:['周期的なプチノイズが出る。スイッチ段数の多い遠い系統ほど目立つ',
+  '客席後方まで引っ張った系統にだけ「チリッ」という規則的なノイズが入るとオペから報告',
+  '手元のモニターは綺麗なのに、遠くの系統だけ録音にプチノイズが混入している'],
+ dip:['あるスイッチ配下の機器が一斉にDante Controllerから見えなくなった。購読も全滅',
+  'スイッチをレンタル機に交換した区画だけ、機器がまるごと行方不明になった',
+  '照明さんから「そっちの島、機材のランプは点いてるのに音出てなくない?」と指摘された',
+  '「一斉に消えたからサイバー攻撃かも」と騒ぎになりかけたが、消えたのは特定の島だけだ'],
+ clk:['特定の機器の入出力にだけ規則的なクリックノイズが乗る。他の機器は正常',
+  '映像同期まわりの設定をいじった後から、1台だけ「プチ…プチ…」と鳴り続けている',
+  'メトロノームのように正確な間隔でノイズを出す機器が1台だけある',
+  '「ワードクロックのケーブルが断線してるのでは」と言われたが、そもそもWCLKは繋いでいない'],
+ nic:['PCのDVSだけ購読が全部✕で通らない。PC本人は「ネットは繋がってるし異常なし」と主張している',
+  '配信担当が「さっきまで見えてたのに」と困っている。そのPC、モバイルWi-Fiに自動接続する設定のままらしい',
+  'そのPC、ブラウザは普通に開けるしYouTubeも見れる。でもDanteだけ全滅している',
+  '「ウイルスかも」とセキュリティソフトのフルスキャンが始まってしまった。もちろん何も出ない'],
+ eee:['不思議なことに、無音や低負荷のときほど復帰の瞬間「プツッ」と途切れる。常時流していると出にくい',
+  'MCの静かな語りの後、曲の頭で一瞬だけ音が欠ける。にぎやかな曲中は一度も起きない',
+  'お客入れBGMの曲間で毎回「プツッ」。曲中は完璧なので余計に目立つ',
+  '「電源が汚れてるんじゃない?」と電源タップを交換したが、症状は何ひとつ変わらなかった'],
+ ip:['機器がDante Controllerで見えたり消えたりを繰り返す。再起動直後は一瞬直るがまた再発する',
+  '2台の機器が交互に現れたり消えたりしている。まるで1つの席を取り合っているようだ',
+  '「電源入れ直したら直りました!」の10分後、また同じ症状。再起動が儀式と化している',
+  '「あのメーカーは相性が悪い」と誰かが言い出したが、同型機のうち片方だけに症状が出ている'],
+ cable:['どこかのリンクLEDが1つ消えている。完全に無音の系統もあれば、なぜか普通に音が出ている系統もある',
+  '転換でステージ上を台車が通った後、リンクLEDが1本落ちた。でも音は出ている…はず?',
+  '朝の仕込みでは全LED点灯を確認した。今数えたら1本足りない',
+  '「ソフトのバグでは?」と再起動を繰り返す者がいるが、そもそも1本はLEDが物理的に消えている'],
+ loop:['全系統が同時に不安定。何もしていないのにネットワーク全体のトラフィックが異常に膨れ上がっている',
+  '手伝いの子が「余ってたLANケーブル、綺麗にまとめて挿しておきました!」と報告してきた直後から全部おかしい',
+  'スイッチというスイッチのLEDが、全ポート同時に狂ったように明滅している',
+  '「機材が多すぎて処理落ちですよ」と訳知り顔の意見が出たが、昨日は同じ台数で平気だった'],
+ qos:['普段は正常。転換で回線が増えるなど負荷が上がった瞬間だけ、全体にジャリッとしたノイズが走る',
+  '静かな場面は完璧なのに、全員が音を出すサビの度に毎回ザラつく',
+  '「盛り上がる曲でだけ音が悪い気がする」とアーティスト側から遠回しなクレーム'],
+ querier:['開演直後は完璧だったのに、数分経つと特定の系統の音が前触れなく消えた。再購読すると一時的に直る',
+  'リハでは何ともなかった。本番3曲目あたりで突然モニターが消え、パッチを張り直したら復活した',
+  '「消えるたびにパッチを張り直せば戻る」ことは分かった。でも5分おきに消える',
+  '「熱暴走だと思う」と扇風機が設置されたが、機材は冷え冷えのまま症状が再発した'],
+ subnet:['あるRio/AVIOだけDante Controllerに現れない。電源もリンクLEDも生きているのに',
+  'レンタル機を受け取ってそのまま繋いだら、その1台だけ影も形も見えない',
+  '本体のパネル操作は普通に効く。ネットワーク側からだけ、その1台が存在しないことになっている'],
+ daisy:['あるRioを接続した途端、両系統まとめて調子が悪くなった。そのRioのケーブルを抜くと収まる',
+  '先週デイジーチェーン現場で使ったRioを繋いだら、PrimaryもSecondaryも両方荒れ始めた',
+  '「そのラック、繋ぐと全部おかしくなるから触るな」と現場で名指しされている機体がある',
+  '「そのRio、初期不良では?」と返品の話まで出ているが、単体テストでは何の問題も出ない'],
+ crc:['日によって調子が違う系統がある。「ケーブルを軽く揺らすと悪化する気がする」と搬入係',
+  '「昨日までは大丈夫だった」— そのケーブル、昨日ケーブルドラムで思いきり巻き直されたらしい',
+  '雨の日だけ調子が悪い気がする、というジンクスめいた報告。ただし屋内の系統である'],
+ sfp:['光の幹線が時々瞬断する。「光だから無敵じゃないの?」と現場は困惑している',
+  '光コネクタを最後に清掃したのがいつか、誰も覚えていない',
+  '幹線を触ってはいないのに、朝の設営時より瞬断の頻度が上がってきている'],
+ fan:['送信側デバイスのフロー残量が警告を出している'],
+};
+/* 適正化報告 — 解消時に現場から届く「直った!」の声 */
+const RESOLVED={
+ iddup:['I/O RACKの表示が安定した。ゲインも狙ったラックだけ動く。','デバイス名が全部ユニークになり、取り違えが消えた。'],
+ hadup:['ゲインが勝手に動く現象、ピタッと止まった。','FOHとMONの疑心暗鬼が解けた。権限の所在が明確になった。'],
+ slow:['途切れていた系統、全chフルで流しても平気になった。','転換後もブツブツ言わなくなった。ゲネも通った。'],
+ igmp:['ネットワークが軽くなった。無関係な機器のLEDも落ち着いた。','余計なトラフィックの流れ込みが消え、小型機器も安定。'],
+ fs:['✕だらけだったパッチが全部✓に変わった。','例の機材、今日は素直にパッチが通る。オペの名誉も回復。'],
+ lat:['遠い系統のチリチリが消えた。どこで聴いてもクリーン。','プチノイズ報告ゼロ。オペからOKサインが出た。'],
+ dip:['行方不明だった区画の機器が一斉に帰ってきた。','スイッチ配下の全機器がControllerに再表示された。'],
+ clk:['例の1台のクリックノイズが完全に消えた。','「プチ…プチ…」が止まった。全機PTPに整列。'],
+ nic:['DVSが安定して見え、購読も全部通った。','配信PC復帰。「最初からこうしてくれ」と配信担当。'],
+ eee:['曲頭の音欠けが出なくなった。静かな場面も安心。','無音明けの「プツッ」、何度試しても再現しなくなった。'],
+ ip:['見えたり消えたりが止まり、全機器が常時表示されている。','席の取り合いが終わった。再起動の儀式も不要に。'],
+ cable:['リンクLED全点灯。両系とも経路が生きている。','断線復旧。冗長も戻って、安心して本番に行ける。'],
+ loop:['ストームが収束し、トラフィックが正常値に戻った。','全ポートの狂った明滅が止まり、ネットワークが静かになった。'],
+ qos:['サビでもザラつかなくなった。フル負荷でも安定。','負荷テストOK。ジッタの報告はもう無い。'],
+ querier:['数分放置しても音が消えなくなった。長時間テストもクリア。','時限爆弾解除。マルチキャストが維持され続けている。'],
+ subnet:['見えなかった1台がControllerに現れた。パッチも通る。','IP修正で即復帰。受入チェックリストにも1行追加した。'],
+ daisy:['例のRioを繋いでも両系が安定するようになった。','名指しされていた機体の汚名返上。モード修正で完全復帰。'],
+ crc:['交換後、揺らしても叩いても安定。エラーカウンタも止まった。','新品ケーブルで一発解決。古い方は現場から永久追放。'],
+ sfp:['清掃後、光リンクが安定。瞬断の報告ゼロ。','幹線が静かになった。清掃キットが備品リストに加わった。'],
+ fan:['フロー残量に余裕が戻った。'],
+};
+/* 障害ID → 診断項目パターン(解消のリアルタイム判定) */
+const FAULT_PATTERN={
+ iddup:/UNIT ID競合/, hadup:/HAコントロール二重/, slow:/リンク帯域(超過|逼迫)/,
+ igmp:/IGMPスヌーピング無効/, fs:/サンプルレート不一致/, lat:/レイテンシ設定が浅い/,
+ dip:/スイッチ設定不一致|購読経路なし/, clk:/クロックソース不整合/, nic:/インターフェース誤バインド/,
+ eee:/EEE/, ip:/IPアドレス重複/, cable:/リンク断/, loop:/ループ配線/,
+ qos:/QoS[^化]*無効/, querier:/クエリア不在/, subnet:/静的IP誤設定/,
+ daisy:/Secondaryポート設定誤り/, fan:/ユニキャスト多重配信/,
+ crc:/ケーブル品質不良/, sfp:/光リンク劣化/,
+};
+let diffSel=3;
+window.setDiff=d=>{diffSel=d;renderChBar()};
+window.startChallenge=(trouble=false,seedOverride=null)=>{
+  if(typeof SFX!=='undefined')SFX.play('start');
+  let seed=seedOverride||Math.floor(Math.random()*2**31);
+  if(!Number.isFinite(seed)||seed<=0)seed=Math.floor(Math.random()*2**31);
+  const rng=mulberry32(seed);
+  const cfg=DIFF[diffSel];
+  const want=trouble?cfg.tflaws:cfg.flaws;
+  loadCleanPreset(presetKey);
+  // verify clean baseline
+  challenge.suspend=true;
+  const base=silentDiagCount();
+  const used=new Set();let injected=0,guard=0;
+  const names=[],ids=[],undos=[];
+  while(injected<want&&guard++<60){
+    const pool=FLAWS.filter(f=>!used.has(f.id)&&f.ap()&&!(trouble&&f.id==='fan'));
+    if(!pool.length)break;
+    const f=pool[Math.floor(rng()*pool.length)];
+    const before=silentDiagCount();
+    const undo=f.inject(rng);
+    if(!undo){used.add(f.id);continue}
+    const after=silentDiagCount();
+    if(after>before){injected++;used.add(f.id);names.push(f.name);ids.push(f.id);undos.push({id:f.id,undo})}
+    else{undo();used.add(f.id)}
+  }
+  // 相互マスキング検証: 他の障害の影響で兆候が診断に現れない障害は取り下げる
+  {let items=runDiag();
+  for(let x=undos.length-1;x>=0;x--){
+    const p=FAULT_PATTERN[undos[x].id];
+    if(p&&!items.some(it=>p.test(it.m))){
+      undos[x].undo();ids.splice(x,1);names.splice(x,1);injected--;
+      items=runDiag();
+    }
+  }}
+  challenge.suspend=false;
+  document.getElementById('reopen').classList.remove('show');
+  challenge.active=true;challenge.cleared=false;challenge.trouble=trouble;challenge.revealed=false;challenge.finalTime=undefined;challenge.finalMoves=undefined;
+  challenge.injectedNames=names;challenge.injectedIds=ids;challenge.resolved=[];challenge.resolvedTexts={};
+  challenge.tickets=ids.map(id=>{const v=SYMPTOM[id]||['原因不明の不調'];return v[Math.floor(rng()*v.length)]});
+  challenge.t0=performance.now();challenge.seed=seed;challenge.moves=0;challenge.flaws=injected;
+  if(trouble){
+    log('sys',`<b>トラブルシューティング開始</b> ${PRESETS[presetKey].title} ${cfg.label} / 障害 ${injected}件`);
+    log('ng',`診断は封印。現場報告・リンク負荷・マトリクスの✕・インスペクタを手掛かりに原因を特定し修正せよ`);
+  }else{
+    log('sys',`<b>チャレンジ開始</b> ${PRESETS[presetKey].title} ${cfg.label} / 欠陥 ${injected}件 注入`);
+    log('ng',`診断パネルの ERROR / WARN をすべて解消して ALL GREEN にせよ`);
+  }
+  refresh();renderChBar();
+};
+window.revealAnswer=()=>{
+  if(!challenge.active||!challenge.trouble)return;
+  challenge.revealed=true;
+  if(typeof SFX!=='undefined')SFX.play('giveup');
+  const t=(performance.now()-challenge.t0)/1000;
+  challenge.finalTime=`${String(Math.floor(t/60)).padStart(2,'0')}:${String(Math.floor(t%60)).padStart(2,'0')}`;
+  challenge.finalMoves=challenge.moves;
+  log('sys',`ギブアップ — 答え合わせを表示。原因: <b>${challenge.injectedNames.join(' / ')}</b>`);
+  refresh();renderChBar();
+  showResult(true);
+};
+function abortChallenge(){
+  if(typeof challenge==='undefined'||!challenge.active)return;
+  challenge.active=false;challenge.cleared=false;
+  const rp=document.getElementById('reopen');if(rp)rp.classList.remove('show');
+  renderChBar();
+}
+function challengeCheck(items){
+  if(!challenge.active||challenge.suspend||challenge.cleared)return;
+  if(countEW(items)===0){
+    challenge.cleared=true;
+    const t=(performance.now()-challenge.t0)/1000;
+    const mm=String(Math.floor(t/60)).padStart(2,'0'),ss=String(Math.floor(t%60)).padStart(2,'0');
+    challenge.finalTime=`${mm}:${ss}`;challenge.finalMoves=challenge.moves;
+    if(typeof SFX!=='undefined')SFX.play('clear');
+    log('ok',`★ <b>SYSTEM CLEAR</b> — ${mm}:${ss} / 手数 ${challenge.moves}`);
+    if(challenge.trouble)log('ok',`原因の答え合わせ: <b>${challenge.injectedNames.join(' / ')}</b>`);
+    const ov=document.getElementById('clearov');
+    document.getElementById('clearmeta').textContent=`${mm}:${ss} / 手数 ${challenge.moves}`+(challenge.trouble?` — 原因: ${challenge.injectedNames.join(' / ')}`:'');
+    ov.classList.add('show');
+    setTimeout(()=>ov.classList.remove('show'),2600);
+    setTimeout(showResult,2100);
+    renderChBar();
+  }
+}
+function showResult(gaveUp=false){
+  challenge._gaveUp=gaveUp;
+  document.getElementById('reopen').classList.remove('show');
+  const cfg=DIFF[diffSel];
+  const ft=challenge.finalTime||'00:00';
+  const [mm,ss]=ft.split(':');
+  const fMoves=challenge.finalMoves!==undefined?challenge.finalMoves:challenge.moves;
+  const base=Math.max(1,challenge.flaws);
+  const ratio=fMoves/base;
+  const rank=gaveUp?'−':(ratio<=2?'S':ratio<=3.5?'A':ratio<=5.5?'B':'C');
+  document.getElementById('rs-rank').textContent=rank;
+  document.getElementById('rs-rank').className='rs-rank r'+(gaveUp?'C':rank);
+  document.getElementById('rs-stats').innerHTML=gaveUp
+    ?`${PRESETS[presetKey].title} / ${cfg.label} TROUBLE / <b style="color:var(--amber)">ギブアップ — 答え合わせ</b><br>
+    <span style="color:var(--faintsolid)">各報告①②③がどの障害だったか、下のカードで対応を確認。「同じ問題で再挑戦」で復習できる</span>`
+    :`${PRESETS[presetKey].title} / ${cfg.label} ${challenge.trouble?'TROUBLE':'CHALLENGE'} / ${mm}:${ss} / 手数${fMoves}<br>
+    <span style="color:var(--faintsolid)">評価は手数効率のみ(障害${challenge.flaws}件基準)。時間は不問 — じっくり調べるのが正解</span>`;
+  const body=document.getElementById('rs-body');
+  body.innerHTML=(challenge.injectedIds||[]).map((id,n)=>{
+    const ex=EXPLAIN_DB[id]||{};
+    const flaw=FLAWS.find(f=>f.id===id);
+    const circ='①②③④⑤⑥⑦⑧⑨'[n]||(n+1);
+    return`<div class="rs-card">
+      <div class="rs-flaw"><span class="rs-tag">${challenge.trouble?`報告${circ}`:String(n+1).padStart(2,'0')}</span>${flaw?flaw.name:id}</div>
+      <div class="rs-row"><b>${challenge.trouble?'報告内容':'症状'}</b>${(challenge.tickets&&challenge.tickets[n])||(SYMPTOM[id]&&SYMPTOM[id][0])||'—'}</div>
+      <div class="rs-row"><b>切り分け</b>${ex.i||'—'}</div>
+      <div class="rs-row"><b>対処</b>${ex.f||'—'}</div>
+      <div class="rs-row memo"><b>現場メモ</b>${ex.m||'—'}</div>
+    </div>`;
+  }).join('')||'<div class="rs-card">障害なし — フリー走行でした</div>';
+  document.getElementById('resultov').classList.add('show');
+}
+let mxOpen=false;
+window.toggleMx=()=>{
+  mxOpen=!mxOpen;
+  document.getElementById('mx-body').style.display=mxOpen?'':'none';
+  document.getElementById('mx-arr').textContent=mxOpen?'▾':'▸';
+};
+window.openLearn=()=>document.getElementById('learnov').classList.add('show');
+window.closeLearn=()=>document.getElementById('learnov').classList.remove('show');
+window.openInspector=()=>{if(typeof SFX!=='undefined')SFX.play('swish');document.getElementById('ins-panel').classList.add('open')};
+window.closeInspector=()=>{
+  document.getElementById('ins-panel').classList.remove('open');
+  if(selDev){selDev=null;renderInspector();}
+};
+window.closeResult=()=>{
+  document.getElementById('resultov').classList.remove('show');
+  if(challenge.active&&(challenge.cleared||challenge.revealed))
+    document.getElementById('reopen').classList.add('show');
+};
+window.reopenResult=()=>showResult(!!challenge._gaveUp);
+window.nextPattern=()=>{
+  document.getElementById('reopen').classList.remove('show');
+  closeResult();
+  startChallenge(challenge.trouble);
+};
+window.retrySeed=()=>{
+  closeResult();
+  startChallenge(challenge.trouble,challenge.seed);
+};
+window.resetSystem=()=>{
+  closeResult();
+  loadPreset(presetKey);
+  log('sys','システムをリセット — 初期状態に戻した');
+};
+function bumpMove(){if(challenge.active&&!challenge.suspend&&!challenge.cleared)challenge.moves++}
+function renderChBar(){
+  const el=document.getElementById('chbar');if(!el)return;
+  let status;
+  if(challenge.cleared){
+    const t=(performance.now()-challenge.t0)/1000;
+    status=`<span class="ch-clear">★ SYSTEM CLEAR — ${String(Math.floor(t/60)).padStart(2,'0')}:${String(Math.floor(t%60)).padStart(2,'0')} / 手数${challenge.moves}</span>`;
+  }else if(challenge.active){
+    status=`<span class="ch-run">${challenge.trouble?'調査中':'RUNNING'} — ${challenge.trouble?'障害':'欠陥'}${challenge.flaws}件 / <span id="ch-clock">00:00</span> / 手数${challenge.moves}</span>`;
+  }else{
+    status=`<span style="color:var(--faint)">待機中 — 題材は選択中のSYSTEM、難易度は欠陥数(★1:2/★2:3/★3:5/★4:7、TROUBLEは1/2/3/4)</span>`;
+  }
+  el.innerHTML=`<span class="ch-title">CHALLENGE</span>
+    <div class="seg">${[1,2,3,4].map(d=>`<button class="${diffSel===d?'on c-cyan':''}" onclick="setDiff(${d})">${DIFF[d].label}</button>`).join('')}</div>
+    <button class="ch-start" onclick="startChallenge(false)">▶ CHALLENGE</button>
+    <button class="ch-start" style="color:#EBD9FF;border-color:rgba(199,160,255,.6);background:linear-gradient(180deg,#6B4FA8,#3A2470)" onclick="startChallenge(true)">▶ TROUBLE<span class="subl">症状から推理</span></button>
+    <button class="btn" onclick="resetSystem()">⟲ リセット</button>
+    ${status}`;
+}
+function updateChallengeClock(){
+  if(!challenge.active||challenge.cleared)return;
+  const el=document.getElementById('ch-clock');if(!el)return;
+  const t=(performance.now()-challenge.t0)/1000;
+  el.textContent=`${String(Math.floor(t/60)).padStart(2,'0')}:${String(Math.floor(t%60)).padStart(2,'0')}`;
+}
+
+
+loadPreset('S');
+renderChBar();
+requestAnimationFrame(tick);
+

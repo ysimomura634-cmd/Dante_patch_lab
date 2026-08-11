@@ -1,0 +1,103 @@
+
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="brand">DANTE PATCH LAB<span class="dot">_</span></div>
+  <div class="tagline">5システム × 欠陥注入 × SEED共有。TROUBLE中は画面が答えを隠す — 機器をクリックして自分の目で確かめろ</div>
+  <span style="flex:1"></span>
+  <button id="sfx-btn" onclick="toggleSfx()" title="効果音">🔊</button>
+  <button id="learn-btn" onclick="openLearn()">？ LEARN</button>
+</header>
+
+<nav class="tabs" id="preset-tabs">
+  <span class="sys-title">SYSTEM</span>
+  <button class="tab on" data-preset="S"><span class="k">小</span>配信・セミナー</button>
+  <button class="tab" data-preset="M"><span class="k">中</span>ホール</button>
+  <button class="tab" data-preset="L"><span class="k">大</span>フェス 2卓運用</button>
+  <span class="hint">全システム冗長化(Primary/Secondary) / 中・大には欠陥仕込み済み / CHALLENGE・TROUBLEは選択中システムが題材</span>
+</nav>
+
+<div class="chbar" id="chbar"></div>
+
+<div class="grid">
+  <div>
+    <div class="card">
+      <div class="card-h"><span class="led"></span><span id="sys-title">TOPOLOGY</span>
+        <span class="sp"></span><span class="mini">デバイスをクリックでインスペクタ</span></div>
+      <canvas id="cv" width="960" height="520"></canvas>
+    </div>
+
+    <div class="card">
+      <div class="card-h mx-toggle" onclick="toggleMx()"><span class="led"></span><span id="mx-arr">▸</span>PATCH MATRIX<span class="desc">Dante Controller風 — クリックで展開</span>
+        <span class="sp"></span><span class="mini" id="flow-summary"></span></div>
+      <div id="mx-body" style="display:none">
+      <div class="mx-tabs" id="mx-tabs"></div>
+      <div class="mx-scroll"><div id="mx-host"></div></div>
+      <div class="mx-note">セルをクリックで購読(RX行 ← TX列)。列頭の <span class="kw">M</span> でそのTXバンクをマルチキャスト化。
+        <span style="color:var(--green)">✓</span>=ユニキャスト購読
+        <span style="color:var(--amber)">◆</span>=マルチキャスト購読
+        <span style="color:var(--red)">✕</span>=購読失敗(レート不一致)
+        — 自デバイスのTXは列に出さない(自己購読は現場でしない)</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">PACKET LOG</div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <div class="card-h"><span class="led"></span>DIAGNOSTICS<span class="sp"></span><span class="health ok" id="health">健全</span></div>
+      <div id="diag"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">NETWORK SETTINGS</div>
+      <div class="netset" id="netset"></div>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  簡略化ポイント: 実機のDante Controllerは1chずつ購読(本ラボは4ch=1フロー単位) / ユニキャスト1フロー≈6Mbps=4ch /
+  リンク上限 10G≈5120ch・1G≈512ch・100M≈48ch (48kHz目安) / フロー上限: Brooklyn系32・<b>Ultimo系(AVIO)は TX2/RX2</b> / EEEはDante網では必ず無効。<br>
+  SWP2-10MMF: etherCON×10 + opticalCON(SFP+ 10GBASE-SR, MMF 最長300m)×2。DIPでDante最適化+VLANプリセット3種を呼出し。<br>
+  UNIT ID仕様: RシリーズはネットワークでID一意必須(D2系は本体SETUPで設定、デバイス名 Y0xx-Yamaha-… に反映)。DM7はI/Oデバイス24台までマウント/HAリモート可。
+</footer>
+
+</div>
+<div id="clearov"><div class="stamp">★ SYSTEM CLEAR</div><div class="stmeta" id="clearmeta"></div></div>
+<div id="opening">
+  <div class="op-inner">
+    <div class="op-logo">DANTE PATCH LAB<span class="op-dot">_</span></div>
+    <div class="op-sub">Dante Network Training Simulator — 現場で効く、推理と修復の教習所</div>
+    <div class="op-press">▸ PRESS START</div>
+    <div class="op-ver">Ver 1.1 — MAJOR BUILD 初号機 / 非公式・教育目的 (YAMAHA, Dante等の商標は各社に帰属)</div>
+  </div>
+</div>
+<div id="ins-panel">
+  <div class="card-h"><span class="led"></span>INSPECTOR<span class="sp"></span>
+    <button class="rs-x" onclick="closeInspector()">✕</button></div>
+  <div id="inspector"></div>
+</div>
+<div id="learnov"><div class="rs-panel">
+  <div class="rs-head"><span class="rs-title">LEARN</span><span id="learn-sub" style="font-family:var(--sans);font-size:11px;color:var(--dim);flex:1">使い方と、実機・現場の背景知識</span>
+    <button class="rs-x" onclick="closeLearn()">✕</button></div>
+  <div id="learn-body" style="overflow-y:auto;padding:15px 22px"><div class="explain" id="explain"></div></div>
+</div></div>
+<button id="reopen" onclick="reopenResult()">📖 解説に戻る</button>
+<div id="resultov"><div class="rs-panel">
+  <div class="rs-head"><span class="rs-rank" id="rs-rank"></span><span class="rs-title">MISSION DEBRIEF</span><span id="rs-stats"></span>
+    <button class="rs-x" onclick="closeResult()">✕</button></div>
+  <div id="rs-body"></div>
+  <div class="rs-foot">
+    <button class="ch-start" style="color:#D8ECFF;border-color:rgba(140,190,255,.6);background:linear-gradient(180deg,#3B5CA8,#1B2F63)" onclick="closeResult()">◎ 画面を確認する</button>
+    <span style="flex:1"></span>
+    <button class="ch-start" onclick="retrySeed()">⟲ 再チャレンジ (同じ問題)</button>
+    <button class="ch-start" style="color:#2A1D04;border-color:var(--gold);background:linear-gradient(180deg,#F5D06E,#C9A344);text-shadow:none" onclick="nextPattern()">▶ 次のパターン</button></div>
+</div></div>
