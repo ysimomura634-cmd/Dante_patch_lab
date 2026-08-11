@@ -3,15 +3,17 @@
 Danteネットワークの学習ゲーム。パッチ・診断・症状推理(TROUBLE)・冗長系までを
 ブラウザ1枚で学べる、現場発のトレーニングシミュレータ。
 
-## 構成
+## 構成 (v1.3)
 
 ```
 src/
-  head.html    … DOCTYPE〜フォント読込
-  style.css    … 全スタイル (KHメニュー様式)
-  body.html    … マークアップ (OP画面含む)
+  head.html    … DOCTYPE〜Google Fonts読込
+  fonts.css    … 内包フォント (Dela Gothic One / WOFF2 Base64)。重いので基本触らない
+  style.css    … 全スタイル (KHメニュー様式 + テーマ3種)
+  body.html    … マークアップ (OP画面・Sバッジ含む)
   opening.js   … オープニング + 効果音(WebAudio合成)
-  app.js       … ゲーム本体 (モデル/診断/障害/描画/UI)
+  bgm.js       … 隠しBGM (YAMAHA.wav)。許諾NGならこのファイルを削除するだけでビルドから消える
+  app.js       … ゲーム本体 (モデル/診断/障害20種/描画/UI/セーブ)
 build.py       … src/ を結合して dist/ に単一HTMLを生成
 dist/          … 配布物 (これ1ファイルで動く)
 ```
@@ -20,38 +22,25 @@ dist/          … 配布物 (これ1ファイルで動く)
 
 ```
 python3 build.py
-→ dist/dante_patch_lab_v1_1.html
+→ dist/dante_patch_lab_v1_3.html
 ```
 
-## Git管理のはじめ方 (Phase 0)
+GitHub Pagesで公開する場合は、生成物を `index.html` にリネームして
+リポジトリ直下(またはPages設定のフォルダ)に置いてPush。
 
-```
-git init
-git add .
-git commit -m "v1.1 — MAJOR BUILD 初号機 (OP画面+効果音)"
-# GitHubにリポジトリを作ったら:
-git remote add origin <リポジトリURL>
-git push -u origin main
-```
+## v1.3 の新要素 (Phase 2)
 
-以後の開発は src/ を編集 → build.py → dist/ を確認、の流れ。
-大きな変更の前にブランチを切れば「後戻り」がいつでも効く。
+- **セーブ**: プリセット×モード別のクリア回数、TROUBLEの最高ランク・レベル別S達成をlocalStorageに記録
+- **ランク評価はTROUBLEのみ**: CHALLENGEは診断が答えを教える練習モードのためランク無し(クリア解説は表示)
+- **報酬解放**: TROUBLEの★1〜★4を小・中・大すべて**Sランク**で制覇(計12個)すると ★5 EX
+  (TROUBLE障害5件 / CHALLENGE欠陥9件) が解放。🔒クリックで条件と進捗(n/12)を表示
+- **Sご褒美演出**: TROUBLEのSクリアで金色「★ S RANK CLEAR」スタンプ、ヘッダーに S×n バッジ
 
-## 今後のロードマップ
+## ロードマップ進捗
 
-- [x] Phase 0: リポジトリ体制 (このREADMEとbuild.py)
-- [x] Phase 1: オープニング画面 + 効果音
-- [ ] Phase 2: localStorageセーブ + クリア報酬(解放システム)
-- [ ] Phase 3: オンライン公開 (GitHub Pages / Cloudflare Pages)
-- [ ] Phase 4: アカウント + クラウドセーブ (Supabase等)
-
-## 注意事項
-
-- **フォント**: 綜藝体(DynaFont)はローカルインストール時に自動採用。
-  `sogei.woff2` を同梱すれば全環境で表示されるが、**Web公開時の埋め込みは
-  DynaFontのライセンス(Webフォント/組み込み条項)を必ず確認すること**。
-  未確認の間は local() + Reggae One フォールバック運用が安全。
-- **商標**: 本作は非公式・教育目的のシミュレータ。YAMAHA、Dante (Audinate)、
-  その他の商標は各社に帰属します。公開時はこの表記を残すこと。
-- **効果音**: 全てWebAudioでコード合成(音源ファイル不使用)。
-  ブラウザの自動再生制限のため、OP画面のPRESS STARTが音声解禁を兼ねる。
+- [x] Phase 0: リポジトリ化 (src分割 + build.py)
+- [x] Phase 1: OP画面 + 効果音
+- [x] Phase 2: ローカルセーブ + クリア報酬 (★5 EX解放)  ← v1.3
+- [x] Phase 3: GitHub Pages公開
+- [ ] Phase 2b: セーブコード書き出し/読み込み (端末間の引き継ぎ)
+- [ ] Phase 4: ユーザー登録 + サーバーセーブ (Firebase等)

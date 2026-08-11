@@ -1,4 +1,3 @@
-
 </head>
 <body>
 <div class="wrap">
@@ -7,6 +6,15 @@
   <div class="brand">DANTE PATCH LAB<span class="dot">_</span></div>
   <div class="tagline">5システム × 欠陥注入 × SEED共有。TROUBLE中は画面が答えを隠す — 機器をクリックして自分の目で確かめろ</div>
   <span style="flex:1"></span>
+  <div id="sbadge" title="Sランク獲得数"></div>
+  <div id="theme-wrap">
+    <button id="theme-btn" onclick="toggleThemePop()" title="テーマ">◑</button>
+    <div id="theme-pop">
+      <button class="th-sw" data-t="pop" onclick="setTheme('pop')"></button>
+      <button class="th-sw on" data-t="def" onclick="setTheme('def')"></button>
+      <button class="th-sw" data-t="chic" onclick="setTheme('chic')"></button>
+    </div>
+  </div>
   <button id="sfx-btn" onclick="toggleSfx()" title="効果音">🔊</button>
   <button id="learn-btn" onclick="openLearn()">？ LEARN</button>
 </header>

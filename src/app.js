@@ -1,4 +1,3 @@
-
 "use strict";
 /* ============ DANTE PATCH LAB — engine ============ */
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
@@ -1210,7 +1209,7 @@ function loadCleanPreset(k){
   document.querySelectorAll('#preset-tabs .tab').forEach(b=>b.classList.toggle('on',b.dataset.preset===k));
   challenge.suspend=false;
 }
-const DIFF={1:{flaws:2,tflaws:1,label:'★1'},2:{flaws:3,tflaws:2,label:'★2'},3:{flaws:5,tflaws:3,label:'★3'},4:{flaws:7,tflaws:4,label:'★4鬼'}};
+const DIFF={1:{flaws:2,tflaws:1,label:'★1'},2:{flaws:3,tflaws:2,label:'★2'},3:{flaws:5,tflaws:3,label:'★3'},4:{flaws:7,tflaws:4,label:'★4鬼'},5:{flaws:9,tflaws:5,label:'★5EX'}};
 const EXPLAIN_DB={
  iddup:{i:'コンソールのマウント一覧を開き、同型番・同IDが並んでいないか確認。実機ではDante Controllerのデバイス名(Y0xx-Yamaha-…)が同名で揺れる、I/O RACKの表示が入れ替わる等で気づく',
   f:'片方のUNIT IDを空き番号へ変更(D2系は本体SETUPメニュー。1〜24)',
@@ -1379,8 +1378,48 @@ const FAULT_PATTERN={
  daisy:/Secondaryポート設定誤り/, fan:/ユニキャスト多重配信/,
  crc:/ケーブル品質不良/, sfp:/光リンク劣化/,
 };
+/* ---------- Phase 2: セーブ & 報酬解放 ---------- */
+const SAVE={
+  key:'dpl_save',
+  d:{v:1,rec:{},sT:{}},
+  load(){try{const j=JSON.parse(localStorage.getItem(this.key)||'null');if(j&&j.v===1){this.d=Object.assign({v:1,rec:{},sT:{}},j);if(!this.d.sT)this.d.sT={};}}catch(e){}},
+  save(){try{localStorage.setItem(this.key,JSON.stringify(this.d));}catch(e){}},
+  rv(r){return({S:4,A:3,B:2,C:1})[r]||0},
+  record(preset,trouble,diff,rank){
+    const k=preset+':'+(trouble?'T':'C');
+    const r=this.d.rec[k]||(this.d.rec[k]={n:0,best:'',bd:0});
+    r.n++;
+    if(trouble&&this.rv(rank)>this.rv(r.best))r.best=rank;
+    if(diff>(r.bd||0))r.bd=diff;
+    /* TROUBLEの★1〜★4のSクリアをレベル別に記録(EX解放条件) */
+    if(trouble&&rank==='S'&&diff>=1&&diff<=4)(this.d.sT[preset]||(this.d.sT[preset]={}))[diff]=true;
+    this.save();
+  },
+  exOn(){return ['S','M','L'].every(k=>[1,2,3,4].every(d=>this.d.sT[k]&&this.d.sT[k][d]))},
+  exProg(){let n=0;for(const k of ['S','M','L'])for(const d of [1,2,3,4])if(this.d.sT[k]&&this.d.sT[k][d])n++;return n},
+  exProgOf(k){return [1,2,3,4].filter(d=>this.d.sT[k]&&this.d.sT[k][d]).length},
+  sCount(){return Object.entries(this.d.rec).filter(([k,r])=>k.endsWith(':T')&&r.best==='S').length},
+};
+SAVE.load();
+function updateSBadge(){
+  const el=document.getElementById('sbadge');if(!el)return;
+  const n=SAVE.sCount();
+  el.textContent='S×'+n;
+  el.classList.toggle('show',n>0);
+}
+window.lockedHint=()=>{
+  if(typeof SFX!=='undefined')SFX.play('swish');
+  log('sys',`🔒 <b>★5 EX</b> — <b style="color:#C7A0FF">TROUBLE</b>の★1〜★4すべてを<b style="color:var(--gold)">Sランク</b>で制覇せよ (達成 ${SAVE.exProg()}/12 — 小${SAVE.exProgOf('S')}/4・中${SAVE.exProgOf('M')}/4・大${SAVE.exProgOf('L')}/4)`);
+};
+function announceEX(){
+  window._exNew=true;
+  if(typeof SFX!=='undefined')SFX.play('resolve');
+  const br=document.querySelector('.brand');
+  if(br){br.style.animation='none';void br.offsetWidth;br.style.animation='glitch .32s steps(2) 3';setTimeout(()=>br.style.animation='',1100);}
+  log('ok','🔓 <b>★5 EX 解放</b> — TROUBLE障害5件同時 / CHALLENGE欠陥9件。腕に覚えがあるなら挑め');
+}
 let diffSel=3;
-window.setDiff=d=>{diffSel=d;renderChBar()};
+window.setDiff=d=>{if(d===5&&!SAVE.exOn())return;diffSel=d;renderChBar()};
 window.startChallenge=(trouble=false,seedOverride=null)=>{
   if(typeof SFX!=='undefined')SFX.play('start');
   let seed=seedOverride||Math.floor(Math.random()*2**31);
@@ -1456,13 +1495,28 @@ function challengeCheck(items){
     if(typeof SFX!=='undefined')SFX.play('clear');
     log('ok',`★ <b>SYSTEM CLEAR</b> — ${mm}:${ss} / 手数 ${challenge.moves}`);
     if(challenge.trouble)log('ok',`原因の答え合わせ: <b>${challenge.injectedNames.join(' / ')}</b>`);
+    /* --- Phase 2: 実績記録と報酬解放 (ランク評価はTROUBLEのみ) --- */
+    const rank=challenge.trouble?calcRank(false,challenge.moves):'';
+    const exBefore=SAVE.exOn();
+    SAVE.record(presetKey,challenge.trouble,diffSel,rank);
+    updateSBadge();
+    if(!exBefore&&SAVE.exOn())setTimeout(announceEX,2700);
+    else if(challenge.trouble&&rank==='S'&&!SAVE.exOn())
+      log('ok',`EXへの道: 達成 <b>${SAVE.exProg()}/12</b> (小${SAVE.exProgOf('S')}/4・中${SAVE.exProgOf('M')}/4・大${SAVE.exProgOf('L')}/4)`);
     const ov=document.getElementById('clearov');
+    const st=ov.querySelector('.stamp');
+    if(st){const g=challenge.trouble&&rank==='S';st.classList.toggle('sGold',g);st.textContent=g?'★ S RANK CLEAR':'★ SYSTEM CLEAR';}
     document.getElementById('clearmeta').textContent=`${mm}:${ss} / 手数 ${challenge.moves}`+(challenge.trouble?` — 原因: ${challenge.injectedNames.join(' / ')}`:'');
     ov.classList.add('show');
     setTimeout(()=>ov.classList.remove('show'),2600);
     setTimeout(showResult,2100);
     renderChBar();
   }
+}
+function calcRank(gaveUp,moves){
+  const base=Math.max(1,challenge.flaws);
+  const ratio=moves/base;
+  return gaveUp?'−':(ratio<=2?'S':ratio<=3.5?'A':ratio<=5.5?'B':'C');
 }
 function showResult(gaveUp=false){
   challenge._gaveUp=gaveUp;
@@ -1471,16 +1525,18 @@ function showResult(gaveUp=false){
   const ft=challenge.finalTime||'00:00';
   const [mm,ss]=ft.split(':');
   const fMoves=challenge.finalMoves!==undefined?challenge.finalMoves:challenge.moves;
-  const base=Math.max(1,challenge.flaws);
-  const ratio=fMoves/base;
-  const rank=gaveUp?'−':(ratio<=2?'S':ratio<=3.5?'A':ratio<=5.5?'B':'C');
-  document.getElementById('rs-rank').textContent=rank;
-  document.getElementById('rs-rank').className='rs-rank r'+(gaveUp?'C':rank);
+  const rank=challenge.trouble?calcRank(gaveUp,fMoves):'';
+  const rr=document.getElementById('rs-rank');
+  rr.style.display=challenge.trouble?'':'none';
+  if(challenge.trouble){rr.textContent=rank;rr.className='rs-rank r'+(gaveUp?'C':rank);}
   document.getElementById('rs-stats').innerHTML=gaveUp
     ?`${PRESETS[presetKey].title} / ${cfg.label} TROUBLE / <b style="color:var(--amber)">ギブアップ — 答え合わせ</b><br>
     <span style="color:var(--faintsolid)">各報告①②③がどの障害だったか、下のカードで対応を確認。「同じ問題で再挑戦」で復習できる</span>`
-    :`${PRESETS[presetKey].title} / ${cfg.label} ${challenge.trouble?'TROUBLE':'CHALLENGE'} / ${mm}:${ss} / 手数${fMoves}<br>
-    <span style="color:var(--faintsolid)">評価は手数効率のみ(障害${challenge.flaws}件基準)。時間は不問 — じっくり調べるのが正解</span>`;
+    :challenge.trouble
+    ?`${PRESETS[presetKey].title} / ${cfg.label} TROUBLE / ${mm}:${ss} / 手数${fMoves}<br>
+    <span style="color:var(--faintsolid)">評価は手数効率のみ(障害${challenge.flaws}件基準)。時間は不問 — じっくり調べるのが正解</span>`
+    :`${PRESETS[presetKey].title} / ${cfg.label} CHALLENGE / ${mm}:${ss} / 手数${fMoves} — <b style="color:var(--green)">ALL GREEN</b><br>
+    <span style="color:var(--faintsolid)">CHALLENGEはランク評価なしの練習モード。下の解説で各欠陥の仕組みを復習しよう — 腕試しはTROUBLEで</span>`;
   const body=document.getElementById('rs-body');
   body.innerHTML=(challenge.injectedIds||[]).map((id,n)=>{
     const ex=EXPLAIN_DB[id]||{};
@@ -1495,6 +1551,7 @@ function showResult(gaveUp=false){
     </div>`;
   }).join('')||'<div class="rs-card">障害なし — フリー走行でした</div>';
   document.getElementById('resultov').classList.add('show');
+  if(rank==='S'&&!gaveUp&&typeof window._secretOn==='function'&&window._secretOn()&&typeof BGM!=='undefined')BGM.play();
 }
 let mxOpen=false;
 window.toggleMx=()=>{
@@ -1510,21 +1567,25 @@ window.closeInspector=()=>{
   if(selDev){selDev=null;renderInspector();}
 };
 window.closeResult=()=>{
+  if(typeof BGM!=='undefined')BGM.stop();
   document.getElementById('resultov').classList.remove('show');
   if(challenge.active&&(challenge.cleared||challenge.revealed))
     document.getElementById('reopen').classList.add('show');
 };
 window.reopenResult=()=>showResult(!!challenge._gaveUp);
 window.nextPattern=()=>{
+  if(typeof BGM!=='undefined')BGM.stop();
   document.getElementById('reopen').classList.remove('show');
   closeResult();
   startChallenge(challenge.trouble);
 };
 window.retrySeed=()=>{
+  if(typeof BGM!=='undefined')BGM.stop();
   closeResult();
   startChallenge(challenge.trouble,challenge.seed);
 };
 window.resetSystem=()=>{
+  if(typeof BGM!=='undefined')BGM.stop();
   closeResult();
   loadPreset(presetKey);
   log('sys','システムをリセット — 初期状態に戻した');
@@ -1539,10 +1600,13 @@ function renderChBar(){
   }else if(challenge.active){
     status=`<span class="ch-run">${challenge.trouble?'調査中':'RUNNING'} — ${challenge.trouble?'障害':'欠陥'}${challenge.flaws}件 / <span id="ch-clock">00:00</span> / 手数${challenge.moves}</span>`;
   }else{
-    status=`<span style="color:var(--faint)">待機中 — 題材は選択中のSYSTEM、難易度は欠陥数(★1:2/★2:3/★3:5/★4:7、TROUBLEは1/2/3/4)</span>`;
+    status=`<span style="color:var(--faint)">待機中 — 題材は選択中のSYSTEM、難易度は欠陥数(★1:2/★2:3/★3:5/★4:7${SAVE.exOn()?'/★5:9':''}、TROUBLEは1/2/3/4${SAVE.exOn()?'/5':''})</span>`;
   }
+  const tiers=SAVE.exOn()?[1,2,3,4,5]:[1,2,3,4];
+  const lockBtn=SAVE.exOn()?'':'<button class="lk" onclick="lockedHint()" title="★5 EX — 解放条件はクリック">🔒</button>';
+  const exNew=window._exNew;window._exNew=false;
   el.innerHTML=`<span class="ch-title">CHALLENGE</span>
-    <div class="seg">${[1,2,3,4].map(d=>`<button class="${diffSel===d?'on c-cyan':''}" onclick="setDiff(${d})">${DIFF[d].label}</button>`).join('')}</div>
+    <div class="seg">${tiers.map(d=>`<button class="${diffSel===d?'on c-cyan':''}${d===5?' exon':''}${d===5&&exNew?' exnew':''}" onclick="setDiff(${d})">${DIFF[d].label}</button>`).join('')}${lockBtn}</div>
     <button class="ch-start" onclick="startChallenge(false)">▶ CHALLENGE</button>
     <button class="ch-start" style="color:#EBD9FF;border-color:rgba(199,160,255,.6);background:linear-gradient(180deg,#6B4FA8,#3A2470)" onclick="startChallenge(true)">▶ TROUBLE<span class="subl">症状から推理</span></button>
     <button class="btn" onclick="resetSystem()">⟲ リセット</button>
@@ -1558,5 +1622,71 @@ function updateChallengeClock(){
 
 loadPreset('S');
 renderChBar();
+updateSBadge();
 requestAnimationFrame(tick);
 
+
+/* ==== DANTE PATCH LAB — UI EXTRAS (Ver 1.2): テーマ切替 / 隠し要素 ==== */
+
+/* ---- テーマ (若手=def / 女子=pop / おじさん=chic) ---- */
+const THEME_CANVAS={
+  def:{panel:'#12204442',line:'#3A5590',ink:'#F2F6FF',dim:'#A9BDD8',faint:'#7E93B8',
+       cyan:'#6FD2FF',red:'#FF7086',amber:'#FFD86B',violet:'#C7A0FF',green:'#6FE8A8',gray:'#6C7FA6'},
+  pop:{panel:'#1C1230',line:'#5A4A8C',ink:'#FBF3FF',dim:'#C9B4E0',faint:'#9A87BC',
+       cyan:'#7FD8FF',red:'#FF7FA0',amber:'#FFCF7E',violet:'#D9A8FF',green:'#7FE8C0',gray:'#8A7FA6'},
+  chic:{panel:'#161512',line:'#4E483C',ink:'#F2EEE6',dim:'#BAB29E',faint:'#8A8270',
+       cyan:'#8FC7BC',red:'#E07A6A',amber:'#C8A96A',violet:'#A89CC8',green:'#8FBF8A',gray:'#7E786C'},
+};
+THEME_CANVAS.def.panel='#101C3C';
+let curTheme='def';
+window.setTheme=t=>{
+  curTheme=t;
+  document.body.dataset.theme=t==='def'?'':t;
+  if(typeof C!=='undefined')Object.assign(C,THEME_CANVAS[t]);
+  try{localStorage.setItem('dpl_theme',t);}catch(e){}
+  document.getElementById('theme-pop').classList.remove('show');
+  document.querySelectorAll('.th-sw').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
+  if(typeof refresh==='function')refresh();
+  if(typeof SFX!=='undefined'){SFX.init();SFX.play('tick');}
+};
+window.toggleThemePop=()=>{
+  document.getElementById('theme-pop').classList.toggle('show');
+};
+document.addEventListener('click',e=>{
+  const w=document.getElementById('theme-wrap');
+  if(w&&!w.contains(e.target))document.getElementById('theme-pop').classList.remove('show');
+});
+
+/* ---- 隠し: タイトル3回クリック ---- */
+let _brandN=0,_brandT=0,_secret=false;
+try{_secret=localStorage.getItem('dpl_secret')==='1';}catch(e){}
+window._secretOn=()=>_secret;
+(function(){
+  const br=document.querySelector('.brand');
+  if(!br)return;
+  br.addEventListener('click',()=>{
+    const now=Date.now();
+    if(now-_brandT>1200)_brandN=0;   /* 間が空いたらカウントし直し */
+    _brandT=now;
+    if(++_brandN<3)return;
+    _brandN=0;
+    br.style.animation='none';
+    void br.offsetWidth;              /* アニメーション再トリガー */
+    br.style.animation='glitch .32s steps(2) 3';
+    setTimeout(()=>{br.style.animation='';},1100);
+    if(!_secret){
+      _secret=true;
+      try{localStorage.setItem('dpl_secret','1');}catch(e){}
+      if(typeof SFX!=='undefined'){SFX.init();SFX.play('resolve');}
+      if(typeof log==='function')log('sys','……何かが解放された気がする');
+    }
+  });
+})();
+
+/* ---- 起動時テーマ復元 ---- */
+(function(){
+  let t='def';
+  try{t=localStorage.getItem('dpl_theme')||'def';}catch(e){}
+  if(!THEME_CANVAS[t])t='def';
+  window.setTheme(t);
+})();
