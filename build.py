@@ -27,7 +27,8 @@ html = (
     + "<script>\n/* build: " + datetime.date.today().isoformat() + " (" + OUT + ") */\n"
     + read("opening.js") + "\n"
     + read("bgm.js")
-    + read("app.js")
+    + read("app.js") + "\n"
+    + read("buildmode.js")
     + "</script>"
     + read("tail.html")
 )

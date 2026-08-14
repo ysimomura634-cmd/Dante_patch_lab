@@ -480,3 +480,12 @@ body[data-theme=chic] body::before{opacity:.4}
 .tab-build .k{color:#C7A0FF}
 .tab-build.locked{opacity:.55}
 .tab-build.locked .k{filter:grayscale(1)}
+
+/* ===== BUILD MODE (v1.4β) ===== */
+.bd-pal{flex-wrap:wrap;max-width:520px}
+.bd-pal .bd-p{font-size:10.5px;padding:3px 7px;letter-spacing:.04em}
+.bd-pal .bd-p.on{color:var(--gold);box-shadow:0 0 8px rgba(245,208,110,.4) inset}
+.bd-green{font-family:var(--disp);color:var(--green);text-shadow:0 0 12px rgba(90,220,130,.6);letter-spacing:.08em}
+.bd-ng{color:var(--amber)}
+.bd-save[disabled]{opacity:.45;pointer-events:none}
+.tab-custom .k{color:var(--gold)}

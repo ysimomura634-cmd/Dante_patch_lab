@@ -963,6 +963,7 @@ function assignIPs(){
 }
 function devIP(d){if(d.badnet)return`192.168.1.${d.ipo}`;return CAT[d.model].cat==='pc'&&d.nic==='WIFI'?`172.16.0.${d.ipo+9}`:`192.168.10.${d.ipo}`}
 function loadPreset(k){
+  if(window.BUILDMODE&&window.BUILDMODE.on)window.BUILDMODE.leave();
   abortChallenge();
   presetKey=k;
   sys=PRESETS[k].build();
@@ -986,7 +987,7 @@ window.buildEntry=(e)=>{
     log('sys',`🔒 <b>BUILD</b> — 全システムの<b style="color:var(--gold)">★5 EX</b>をSランクで制覇した者だけが、システムを組む側に回れる (達成 ${SAVE.buildProg()}/3)`);
     return;
   }
-  log('sys','🚧 <b>BUILD</b> — β開発中。次のアップデートで機材配置キャンバスが開放される');
+  if(window.BUILDMODE)window.BUILDMODE.enter();
 };
 function refreshBuildTab(){
   const t=document.getElementById('tab-build');if(!t)return;
@@ -1610,6 +1611,7 @@ window.resetSystem=()=>{
 function bumpMove(){if(challenge.active&&!challenge.suspend&&!challenge.cleared)challenge.moves++}
 function renderChBar(){
   const el=document.getElementById('chbar');if(!el)return;
+  if(window.BUILDMODE&&window.BUILDMODE.on){window.BUILDMODE.renderBar();return;}
   let status;
   if(challenge.cleared){
     const t=(performance.now()-challenge.t0)/1000;
@@ -1625,7 +1627,9 @@ function renderChBar(){
   el.innerHTML=`<span class="ch-title">CHALLENGE</span>
     <div class="seg">${tiers.map(d=>`<button class="${diffSel===d?'on c-cyan':''}${d===5?' exon':''}${d===5&&exNew?' exnew':''}" onclick="setDiff(${d})">${DIFF[d].label}</button>`).join('')}${lockBtn}</div>
     <button class="ch-start" onclick="startChallenge(false)">▶ CHALLENGE</button>
-    <button class="ch-start" style="color:#EBD9FF;border-color:rgba(199,160,255,.6);background:linear-gradient(180deg,#6B4FA8,#3A2470)" onclick="startChallenge(true)">▶ TROUBLE<span class="subl">症状から推理</span></button>
+    ${presetKey==='C'
+      ?`<button class="ch-start" style="opacity:.5;color:#EBD9FF;border-color:rgba(199,160,255,.35)" onclick="log('sys','カスタムのTROUBLEは障害カタログの監査後に解禁予定(β) — まずはCHALLENGEで')">▶ TROUBLE<span class="subl">準備中</span></button>`
+      :`<button class="ch-start" style="color:#EBD9FF;border-color:rgba(199,160,255,.6);background:linear-gradient(180deg,#6B4FA8,#3A2470)" onclick="startChallenge(true)">▶ TROUBLE<span class="subl">症状から推理</span></button>`}
     <button class="btn" onclick="resetSystem()">⟲ リセット</button>
     ${status}`;
 }
