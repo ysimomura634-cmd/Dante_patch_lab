@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""DANTE PATCH LAB — build script (v1.2構成)
-src/ 配下のソースを結合して dist/ に単一HTMLを生成する。
-使い方:  python3 build.py            → dist/dante_patch_lab_v1_3.html
-        python3 build.py 出力名.html
+"""DANTE PATCH LAB — build script (v1.4 2枚出し運用)
 
-構成メモ:
-  fonts.css … 内包フォント(Dela Gothic One WOFF2 Base64)。重いので編集対象外
-  bgm.js    … 隠しBGM(YAMAHA.wav)。許諾NGならこのファイルを削除するだけでビルドから消える
+  python3 build.py              → dist/beta.html + リポジトリ直下に beta.html を自動コピー
+  python3 build.py index.html   → dist/index.html + 直下に index.html (安定版の昇格時のみ使う)
+
+運用ルール:
+  ・普段の開発は必ず引数なし(beta)。公開URLの本体 index.html には触れない
+  ・betaが安定したら `python3 build.py index.html` で昇格 → Commit → Push
+  ・fonts.css=内包フォント(触らない) / bgm.js=削除するだけでBGMがビルドから消える
 """
-import sys, pathlib, datetime
+import sys, pathlib, datetime, shutil
 
 ROOT = pathlib.Path(__file__).parent
 SRC = ROOT / "src"
 DIST = ROOT / "dist"
-OUT = sys.argv[1] if len(sys.argv) > 1 else "dante_patch_lab_v1_3.html"
+OUT = sys.argv[1] if len(sys.argv) > 1 else "beta.html"
 
 def read(name):
     p = SRC / name
@@ -23,9 +24,9 @@ html = (
     read("head.html")
     + "<style>\n" + read("fonts.css") + "\n" + read("style.css") + "</style>"
     + read("body.html")
-    + "<script>\n/* build: " + datetime.date.today().isoformat() + " */\n"
+    + "<script>\n/* build: " + datetime.date.today().isoformat() + " (" + OUT + ") */\n"
     + read("opening.js") + "\n"
-    + read("bgm.js")          # 任意: 無ければ空文字(BGM機能ごと消える)
+    + read("bgm.js")
     + read("app.js")
     + "</script>"
     + read("tail.html")
@@ -34,4 +35,6 @@ html = (
 DIST.mkdir(exist_ok=True)
 out = DIST / OUT
 out.write_text(html, encoding="utf-8")
+shutil.copyfile(out, ROOT / OUT)   # 直下にも自動コピー → Pagesにそのまま乗る
 print(f"built → {out}  ({len(html):,} bytes)")
+print(f"copied → {ROOT / OUT}  (Commit → Push で公開されます)")

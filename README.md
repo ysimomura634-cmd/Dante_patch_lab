@@ -36,6 +36,20 @@ GitHub Pagesで公開する場合は、生成物を `index.html` にリネーム
   (TROUBLE障害5件 / CHALLENGE欠陥9件) が解放。🔒クリックで条件と進捗(n/12)を表示
 - **Sご褒美演出**: TROUBLEのSクリアで金色「★ S RANK CLEAR」スタンプ、ヘッダーに S×n バッジ
 
+## 2枚出し運用 (v1.4〜)
+
+- `index.html` … 安定版。クルーに配っているURLの本体。**普段は触らない**
+- `beta.html`  … 実験版。`python3 build.py` で自動生成&直下コピーされる。
+  公開URLの末尾に `/beta.html` を付けるとアクセス可能。`?dev=1` を付けるとEX/BUILDが仮解放(検証用)
+- betaが安定したら `python3 build.py index.html` で昇格
+
+## v1.4β (開発中): BUILDモード
+
+- SYSTEMタブに **BUILD**(🔒)が出現。解放条件は「小・中・大すべて★5 EXをSランクでクリア」
+- 構想: 機材を自由配置・接続→patch設定→diagnosticsが検証。ALL GREENを一度出すとSAVE可能になり、
+  謎解きモードの「カスタム」として登録できる
+- 初期スコープ: 機材は既存プリセット登場分のみ / まずCHALLENGE対応、TROUBLEは障害カタログ監査後 / MADI・AESは見送り
+
 ## ロードマップ進捗
 
 - [x] Phase 0: リポジトリ化 (src分割 + build.py)

@@ -977,8 +977,22 @@ function loadPreset(k){
   refresh();
 }
 document.getElementById('preset-tabs').addEventListener('click',e=>{
-  const b=e.target.closest('.tab');if(b)loadPreset(b.dataset.preset);
+  const b=e.target.closest('.tab');if(b&&b.dataset.preset)loadPreset(b.dataset.preset);
 });
+window.buildEntry=(e)=>{
+  e.stopPropagation();
+  if(typeof SFX!=='undefined')SFX.play('swish');
+  if(!SAVE.buildOn()){
+    log('sys',`🔒 <b>BUILD</b> — 全システムの<b style="color:var(--gold)">★5 EX</b>をSランクで制覇した者だけが、システムを組む側に回れる (達成 ${SAVE.buildProg()}/3)`);
+    return;
+  }
+  log('sys','🚧 <b>BUILD</b> — β開発中。次のアップデートで機材配置キャンバスが開放される');
+};
+function refreshBuildTab(){
+  const t=document.getElementById('tab-build');if(!t)return;
+  t.innerHTML=SAVE.buildOn()?'<span class="k">築</span>BUILD':'<span class="k">🔒</span>BUILD';
+  t.classList.toggle('locked',!SAVE.buildOn());
+}
 
 /* ---------- loop ---------- */
 function tick(now){
@@ -1379,6 +1393,7 @@ const FAULT_PATTERN={
  crc:/ケーブル品質不良/, sfp:/光リンク劣化/,
 };
 /* ---------- Phase 2: セーブ & 報酬解放 ---------- */
+const DEV_MODE=/[?&]dev=1/.test(location.search);   /* β検証用バックドア(?dev=1) */
 const SAVE={
   key:'dpl_save',
   d:{v:1,rec:{},sT:{}},
@@ -1392,12 +1407,14 @@ const SAVE={
     if(trouble&&this.rv(rank)>this.rv(r.best))r.best=rank;
     if(diff>(r.bd||0))r.bd=diff;
     /* TROUBLEの★1〜★4のSクリアをレベル別に記録(EX解放条件) */
-    if(trouble&&rank==='S'&&diff>=1&&diff<=4)(this.d.sT[preset]||(this.d.sT[preset]={}))[diff]=true;
+    if(trouble&&rank==='S'&&diff>=1&&diff<=5)(this.d.sT[preset]||(this.d.sT[preset]={}))[diff]=true;   /* 5=EXのS(BUILD解放条件) */
     this.save();
   },
-  exOn(){return ['S','M','L'].every(k=>[1,2,3,4].every(d=>this.d.sT[k]&&this.d.sT[k][d]))},
+  exOn(){return DEV_MODE||['S','M','L'].every(k=>[1,2,3,4].every(d=>this.d.sT[k]&&this.d.sT[k][d]))},
   exProg(){let n=0;for(const k of ['S','M','L'])for(const d of [1,2,3,4])if(this.d.sT[k]&&this.d.sT[k][d])n++;return n},
   exProgOf(k){return [1,2,3,4].filter(d=>this.d.sT[k]&&this.d.sT[k][d]).length},
+  buildOn(){return DEV_MODE||['S','M','L'].every(k=>this.d.sT[k]&&this.d.sT[k][5])},
+  buildProg(){return ['S','M','L'].filter(k=>this.d.sT[k]&&this.d.sT[k][5]).length},
   sCount(){return Object.entries(this.d.rec).filter(([k,r])=>k.endsWith(':T')&&r.best==='S').length},
 };
 SAVE.load();
@@ -1623,6 +1640,7 @@ function updateChallengeClock(){
 loadPreset('S');
 renderChBar();
 updateSBadge();
+refreshBuildTab();
 requestAnimationFrame(tick);
 
 
